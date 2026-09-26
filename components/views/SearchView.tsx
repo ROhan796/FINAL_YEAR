@@ -5,6 +5,7 @@ import { Search, Sparkles, Zap, Filter, RotateCcw, ArrowRight, History, ShieldAl
 import { usePlatformStore } from '@/lib/platform-store';
 import { PaperCard } from '../PaperCard';
 import { Paper } from '@/lib/mock-data';
+import { searchApi } from '@/lib/api';
 
 interface SearchViewProps {
   onOpenPaperDetail: (paper: Paper) => void;
@@ -46,24 +47,15 @@ export const SearchView: React.FC<SearchViewProps> = ({
     addSearchHistory(searchQuery);
 
     try {
-      const res = await fetch('/api/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: searchQuery,
-          mode: searchMode,
-          papers,
-          isHttpAccelerated
-        })
+      const data = await searchApi.search(searchQuery, {
+        mode: searchMode,
+        limit: 20,
       });
-      const data = await res.json();
-      if (data.results) {
-        setResults(data.results);
-        setSearchLatency(data.latencyMs);
-        setQueryUnderstanding(data.queryUnderstanding || '');
-        if (data.suggestedSearches) {
-          setSuggestedSearches(data.suggestedSearches);
-        }
+      setResults(data.results as unknown as Paper[]);
+      setSearchLatency(data.latencyMs);
+      setQueryUnderstanding(data.queryUnderstanding || '');
+      if (data.suggestedSearches) {
+        setSuggestedSearches(data.suggestedSearches);
       }
     } catch (e) {
       console.error('Search API error:', e);

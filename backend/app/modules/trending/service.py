@@ -103,7 +103,7 @@ class TrendingService:
                 clusters=clusters,
                 computed_at=datetime.now(UTC),
             )
-            self.db.merge(topic)
+            self.db.add(topic)
             created.append(topic)
         self.db.commit()
         return created

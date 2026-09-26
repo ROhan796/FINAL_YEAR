@@ -210,7 +210,7 @@ class FeedPostOut(BaseModel):
     authorVerified: bool = Field(validation_alias="author_verified")
     content: str
     postType: PostType = Field(validation_alias="post_type")
-    timestamp: str
+    timestamp: str = ""
     likes: int = Field(validation_alias="like_count")
     linkedPaper: PaperOut | None = Field(default=None, validation_alias="linked_paper")
     comments: list[FeedCommentOut] = []

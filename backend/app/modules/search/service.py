@@ -107,8 +107,9 @@ class SearchService:
         query_understanding = self._understand(query, page, enabled=use_llm)
 
         results: list[PaperOut] = []
-        for paper, sig in zip(page, signals, strict=False):
-            out = PaperOut.model_validate(paper, from_attributes=True)
+        for item, sig in zip(page, signals, strict=False):
+            orm_paper = getattr(item, "paper", item)
+            out = PaperOut.model_validate(orm_paper, from_attributes=True)
             out.relevanceSignal = sig["signal"]
             out.reasoningEvidence = sig["evidence"]
             results.append(out)

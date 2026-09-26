@@ -1,0 +1,76 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ckgai
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/ckgai-dev
+    volumes:
+      - neo4jdata:/data
+    profiles:
+      - graph  # optional: only start with --profile graph
+
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql+psycopg://postgres:postgres@postgres:5432/ckgai"
+      REDIS_URL: "redis://redis:6379/0"
+      NEO4J_ENABLED: "false"
+      APP_ENV: "dev"
+      LLM_PROVIDER: "fallback"
+      ML_DEVICE: "cpu"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+
+  frontend:
+    build: ../
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8000"
+    profiles:
+      - full  # only start with --profile full
+
+volumes:
+  pgdata:
+  neo4jdata:

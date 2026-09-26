@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Paper,
   Researcher,
@@ -18,6 +18,7 @@ import {
   INITIAL_TRENDING_TOPICS,
   INITIAL_MANUSCRIPTS
 } from './mock-data';
+import { authApi, papersApi, feedApi, collectionsApi, researchersApi, projectsApi, manuscriptsApi, notificationsApi, searchApi } from './api';
 
 export interface UserProfile {
   id: string;
@@ -61,7 +62,7 @@ interface PlatformState {
   searchHistory: string[];
 }
 
-const getInitialState = (): PlatformState => {
+function getInitialState(): PlatformState {
   if (typeof window === 'undefined') {
     return {
       user: DEFAULT_USER,
@@ -113,10 +114,11 @@ const getInitialState = (): PlatformState => {
     manuscripts: INITIAL_MANUSCRIPTS,
     searchHistory: ['multimodal reasoning', 'quantum surface spectroscopy']
   };
-};
+}
 
 let globalState: PlatformState | null = null;
 let isInitializedOnClient = false;
+let backendSynced = false;
 const listeners = new Set<(state: PlatformState) => void>();
 
 function getStoreState(): PlatformState {
@@ -142,6 +144,100 @@ function setStoreState(updater: (prev: PlatformState) => PlatformState) {
   listeners.forEach((listener) => listener(nextState));
 }
 
+/** Partial state update — merges into current state without replacing everything. */
+function patchStore(patch: Partial<PlatformState>) {
+  setStoreState((prev) => ({ ...prev, ...patch }));
+}
+
+// ── Backend sync (runs once on mount) ──────────────────────────────────
+
+async function syncFromBackend() {
+  if (backendSynced || typeof window === 'undefined') return;
+  backendSynced = true;
+
+  try {
+    // 1. Auth: dev-login to get tokens + user
+    const tokens = await authApi.devLogin();
+    const user: UserProfile = tokens.user;
+    patchStore({ user });
+
+    // 2. Papers
+    try {
+      const paperRes = await papersApi.list();
+      if (paperRes.items?.length) {
+        patchStore({ papers: paperRes.items as unknown as Paper[] });
+      }
+    } catch { /* keep mock */ }
+
+    // 3. Saved papers
+    try {
+      const savedRes = await papersApi.getSaved();
+      if (savedRes.items) {
+        patchStore({ savedPaperIds: savedRes.items.map((p: Paper) => p.id) });
+      }
+    } catch { /* keep mock */ }
+
+    // 4. Feed
+    try {
+      const feedRes = await feedApi.getFeed();
+      if (feedRes.items?.length) {
+        patchStore({ feedPosts: feedRes.items as unknown as FeedPost[] });
+      }
+    } catch { /* keep mock */ }
+
+    // 5. Collections
+    try {
+      const colRes = await collectionsApi.list();
+      if (colRes.items?.length) {
+        patchStore({ collections: colRes.items as unknown as Collection[] });
+      }
+    } catch { /* keep mock */ }
+
+    // 6. Researchers
+    try {
+      const resRes = await researchersApi.list();
+      if (resRes.items?.length) {
+        patchStore({ researchers: resRes.items as unknown as Researcher[] });
+      }
+    } catch { /* keep mock */ }
+
+    // 7. Projects
+    try {
+      const projRes = await projectsApi.list();
+      if (projRes.items?.length) {
+        patchStore({ projects: projRes.items as unknown as WorkspaceProject[] });
+      }
+    } catch { /* keep mock */ }
+
+    // 8. Manuscripts
+    try {
+      const msRes = await manuscriptsApi.list();
+      if (msRes.items?.length) {
+        patchStore({ manuscripts: msRes.items as unknown as ManuscriptSubmission[] });
+      }
+    } catch { /* keep mock */ }
+
+    // 9. Notifications
+    try {
+      const notifRes = await notificationsApi.list();
+      if (notifRes.items?.length) {
+        patchStore({ notifications: notifRes.items as unknown as NotificationItem[] });
+      }
+    } catch { /* keep mock */ }
+
+    // 10. Search history
+    try {
+      const histRes = await searchApi.getHistory();
+      if (histRes?.length) {
+        patchStore({ searchHistory: histRes });
+      }
+    } catch { /* keep mock */ }
+
+  } catch (err) {
+    console.warn('Backend sync failed, using local data:', err);
+  }
+}
+
 export function usePlatformStore() {
   const [state, setState] = useState<PlatformState>(getStoreState);
 
@@ -150,12 +246,17 @@ export function usePlatformStore() {
       setState(newState);
     };
     listeners.add(listener);
+
+    // Trigger backend sync on first mount
+    syncFromBackend();
+
     return () => {
       listeners.delete(listener);
     };
   }, []);
 
-  const toggleSavePaper = (paperId: string) => {
+  const toggleSavePaper = useCallback((paperId: string) => {
+    // Optimistic local update
     setStoreState((prev) => {
       const isSaved = prev.savedPaperIds.includes(paperId);
       const updatedSaved = isSaved
@@ -163,9 +264,11 @@ export function usePlatformStore() {
         : [...prev.savedPaperIds, paperId];
       return { ...prev, savedPaperIds: updatedSaved };
     });
-  };
+    // Backend call (fire and forget)
+    papersApi.save(paperId).catch(() => papersApi.unsave(paperId).catch(() => {}));
+  }, []);
 
-  const toggleFollowResearcher = (researcherId: string) => {
+  const toggleFollowResearcher = useCallback((researcherId: string) => {
     setStoreState((prev) => {
       const updated = prev.researchers.map((r) => {
         if (r.id === researcherId) {
@@ -180,9 +283,10 @@ export function usePlatformStore() {
       });
       return { ...prev, researchers: updated };
     });
-  };
+    researchersApi.follow(researcherId).catch(() => researchersApi.unfollow(researcherId).catch(() => {}));
+  }, []);
 
-  const toggleLikePost = (postId: string) => {
+  const toggleLikePost = useCallback((postId: string) => {
     setStoreState((prev) => {
       const updatedPosts = prev.feedPosts.map((post) => {
         if (post.id === postId) {
@@ -197,160 +301,197 @@ export function usePlatformStore() {
       });
       return { ...prev, feedPosts: updatedPosts };
     });
-  };
+    feedApi.toggleLike(postId).catch(() => {});
+  }, []);
 
-  const addCommentToPost = (postId: string, commentText: string) => {
+  const addCommentToPost = useCallback((postId: string, commentText: string) => {
     if (!commentText.trim()) return;
+    const currentUser = getStoreState().user;
     setStoreState((prev) => {
       const newComment = {
         id: 'c-' + Date.now(),
-        authorName: prev.user.name,
-        authorInstitution: prev.user.institution,
-        authorAvatar: prev.user.avatar,
+        authorName: currentUser.name,
+        authorInstitution: currentUser.institution,
+        authorAvatar: currentUser.avatar,
         content: commentText.trim(),
         timestamp: 'Just now',
-        verified: prev.user.verified
+        verified: currentUser.verified
       };
       const updatedPosts = prev.feedPosts.map((post) => {
         if (post.id === postId) {
-          return {
-            ...post,
-            comments: [...post.comments, newComment]
-          };
+          return { ...post, comments: [...post.comments, newComment] };
         }
         return post;
       });
       return { ...prev, feedPosts: updatedPosts };
     });
-  };
+    feedApi.addComment(postId, commentText).catch(() => {});
+  }, []);
 
-  const createPost = (content: string, postType: FeedPost['postType'], linkedPaper?: Paper) => {
+  const createPost = useCallback((content: string, postType: FeedPost['postType'], linkedPaper?: Paper) => {
     if (!content.trim()) return;
-    setStoreState((prev) => {
-      const newPost: FeedPost = {
-        id: 'post-' + Date.now(),
-        authorId: prev.user.id,
-        authorName: prev.user.name,
-        authorTitle: prev.user.title,
-        authorInstitution: prev.user.institution,
-        authorAvatar: prev.user.avatar,
-        authorVerified: prev.user.verified,
-        content: content.trim(),
-        postType,
-        timestamp: 'Just now',
-        likes: 0,
-        linkedPaper,
-        comments: [],
-        tags: [postType, 'Research'],
-        isLiked: false
-      };
-      return { ...prev, feedPosts: [newPost, ...prev.feedPosts] };
+    feedApi.createPost({ content, postType, linkedPaperId: linkedPaper?.id }).then((newPost) => {
+      setStoreState((prev) => ({
+        ...prev,
+        feedPosts: [newPost as unknown as FeedPost, ...prev.feedPosts]
+      }));
+    }).catch(() => {
+      // Fallback: local-only post
+      const currentUser = getStoreState().user;
+      setStoreState((prev) => {
+        const newPost: FeedPost = {
+          id: 'post-' + Date.now(),
+          authorId: currentUser.id,
+          authorName: currentUser.name,
+          authorTitle: currentUser.title,
+          authorInstitution: currentUser.institution,
+          authorAvatar: currentUser.avatar,
+          authorVerified: currentUser.verified,
+          content: content.trim(),
+          postType,
+          timestamp: 'Just now',
+          likes: 0,
+          linkedPaper,
+          comments: [],
+          tags: [postType, 'Research'],
+          isLiked: false
+        };
+        return { ...prev, feedPosts: [newPost, ...prev.feedPosts] };
+      });
     });
-  };
+  }, []);
 
-  const createCollection = (name: string, description: string) => {
-    setStoreState((prev) => {
-      const newCol: Collection = {
-        id: 'col-' + Date.now(),
-        name,
-        description,
-        pinned: false,
-        paperIds: [],
-        createdDate: new Date().toISOString().split('T')[0],
-        aiSummary: 'Collection created. Add papers to generate AI collection analysis.',
-        shareableLink: `https://ai.studio/collections/col-${Date.now()}?share=token`
-      };
-      return { ...prev, collections: [newCol, ...prev.collections] };
+  const createCollection = useCallback((name: string, description: string) => {
+    collectionsApi.create({ name, description }).then((newCol) => {
+      setStoreState((prev) => ({
+        ...prev,
+        collections: [newCol as unknown as Collection, ...prev.collections]
+      }));
+    }).catch(() => {
+      setStoreState((prev) => {
+        const newCol: Collection = {
+          id: 'col-' + Date.now(),
+          name,
+          description,
+          pinned: false,
+          paperIds: [],
+          createdDate: new Date().toISOString().split('T')[0],
+          aiSummary: 'Collection created.',
+          shareableLink: `https://ai.studio/collections/col-${Date.now()}?share=token`
+        };
+        return { ...prev, collections: [newCol, ...prev.collections] };
+      });
     });
-  };
+  }, []);
 
-  const togglePinCollection = (collectionId: string) => {
+  const togglePinCollection = useCallback((collectionId: string) => {
     setStoreState((prev) => {
+      const col = prev.collections.find((c) => c.id === collectionId);
+      if (col) collectionsApi.update(collectionId, { pinned: !col.pinned }).catch(() => {});
       const updated = prev.collections.map((c) => (c.id === collectionId ? { ...c, pinned: !c.pinned } : c));
       return { ...prev, collections: updated };
     });
-  };
+  }, []);
 
-  const addPaperToCollection = (collectionId: string, paperId: string) => {
+  const addPaperToCollection = useCallback((collectionId: string, paperId: string) => {
     setStoreState((prev) => {
       const updated = prev.collections.map((c) => {
         if (c.id === collectionId && !c.paperIds.includes(paperId)) {
+          collectionsApi.addPaper(collectionId, paperId).catch(() => {});
           return { ...c, paperIds: [...c.paperIds, paperId] };
         }
         return c;
       });
       return { ...prev, collections: updated };
     });
-  };
+  }, []);
 
-  const removePaperFromCollection = (collectionId: string, paperId: string) => {
+  const removePaperFromCollection = useCallback((collectionId: string, paperId: string) => {
     setStoreState((prev) => {
       const updated = prev.collections.map((c) => {
         if (c.id === collectionId) {
+          collectionsApi.removePaper(collectionId, paperId).catch(() => {});
           return { ...c, paperIds: c.paperIds.filter((id) => id !== paperId) };
         }
         return c;
       });
       return { ...prev, collections: updated };
     });
-  };
+  }, []);
 
-  const deleteCollection = (collectionId: string) => {
+  const deleteCollection = useCallback((collectionId: string) => {
+    collectionsApi.delete(collectionId).catch(() => {});
     setStoreState((prev) => ({
       ...prev,
       collections: prev.collections.filter((c) => c.id !== collectionId)
     }));
-  };
+  }, []);
 
-  const createWorkspaceProject = (name: string, description: string, field: string) => {
-    setStoreState((prev) => {
-      const newProj: WorkspaceProject = {
-        id: 'proj-' + Date.now(),
-        name,
-        description,
-        field,
-        status: 'Active',
-        ownerName: prev.user.name,
-        members: [{ name: prev.user.name, role: 'Owner', email: prev.user.email, avatar: prev.user.avatar }],
-        paperIds: [],
-        notes: [],
-        tasks: [],
-        milestones: [],
-        datasets: [],
-        documents: [],
-        discussions: [],
-        activityHistory: [
-          { date: 'Mon', papersAdded: 1, notesCreated: 1, tasksCompleted: 0 }
-        ]
-      };
-      return { ...prev, projects: [newProj, ...prev.projects] };
-    });
-  };
-
-  const addTaskToProject = (projectId: string, title: string, dueDate: string, assigneeName: string) => {
-    setStoreState((prev) => {
-      const newTask = {
-        id: 't-' + Date.now(),
-        title,
-        dueDate: dueDate || '2026-08-30',
-        assigneeName: assigneeName || prev.user.name,
-        assigneeAvatar: prev.user.avatar,
-        status: 'Todo' as const
-      };
-      const updatedProjects = prev.projects.map((p) => {
-        if (p.id === projectId) {
-          return { ...p, tasks: [...p.tasks, newTask] };
-        }
-        return p;
+  const createWorkspaceProject = useCallback((name: string, description: string, field: string) => {
+    projectsApi.create({ name, description, field }).then((newProj) => {
+      setStoreState((prev) => ({
+        ...prev,
+        projects: [newProj as unknown as WorkspaceProject, ...prev.projects]
+      }));
+    }).catch(() => {
+      const currentUser = getStoreState().user;
+      setStoreState((prev) => {
+        const newProj: WorkspaceProject = {
+          id: 'proj-' + Date.now(),
+          name,
+          description,
+          field,
+          status: 'Active',
+          ownerName: currentUser.name,
+          members: [{ name: currentUser.name, role: 'Owner', email: currentUser.email, avatar: currentUser.avatar }],
+          paperIds: [],
+          notes: [],
+          tasks: [],
+          milestones: [],
+          datasets: [],
+          documents: [],
+          discussions: [],
+          activityHistory: [{ date: 'Mon', papersAdded: 1, notesCreated: 1, tasksCompleted: 0 }]
+        };
+        return { ...prev, projects: [newProj, ...prev.projects] };
       });
-      return { ...prev, projects: updatedProjects };
     });
-  };
+  }, []);
 
-  const updateTaskStatus = (projectId: string, taskId: string, newStatus: Task['status']) => {
+  const addTaskToProject = useCallback((projectId: string, title: string, dueDate: string, assigneeName: string) => {
+    projectsApi.addTask(projectId, { title, dueDate, assigneeName }).then((newTask) => {
+      setStoreState((prev) => {
+        const updatedProjects = prev.projects.map((p) => {
+          if (p.id === projectId) return { ...p, tasks: [...p.tasks, newTask as unknown as Task] };
+          return p;
+        });
+        return { ...prev, projects: updatedProjects };
+      });
+    }).catch(() => {
+      const currentUser = getStoreState().user;
+      setStoreState((prev) => {
+        const newTask = {
+          id: 't-' + Date.now(),
+          title,
+          dueDate: dueDate || '2026-08-30',
+          assigneeName: assigneeName || currentUser.name,
+          assigneeAvatar: currentUser.avatar,
+          status: 'Todo' as const
+        };
+        const updatedProjects = prev.projects.map((p) => {
+          if (p.id === projectId) return { ...p, tasks: [...p.tasks, newTask] };
+          return p;
+        });
+        return { ...prev, projects: updatedProjects };
+      });
+    });
+  }, []);
+
+  const updateTaskStatus = useCallback((projectId: string, taskId: string, newStatus: Task['status']) => {
     setStoreState((prev) => {
       const updatedProjects = prev.projects.map((p) => {
         if (p.id === projectId) {
+          projectsApi.updateTask(projectId, taskId, { status: newStatus }).catch(() => {});
           const updatedTasks = p.tasks.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t));
           return { ...p, tasks: updatedTasks };
         }
@@ -358,111 +499,158 @@ export function usePlatformStore() {
       });
       return { ...prev, projects: updatedProjects };
     });
-  };
+  }, []);
 
-  const addNoteToProject = (projectId: string, title: string, content: string, paperId?: string) => {
-    setStoreState((prev) => {
-      const paper = prev.papers.find((p) => p.id === paperId);
-      const newNote = {
-        id: 'note-' + Date.now(),
-        title,
-        content,
-        paperId,
-        paperTitle: paper?.title,
-        updatedAt: new Date().toISOString().split('T')[0],
-        authorName: prev.user.name
-      };
-      const updatedProjects = prev.projects.map((p) => {
-        if (p.id === projectId) {
-          return { ...p, notes: [newNote, ...p.notes] };
-        }
-        return p;
+  const addNoteToProject = useCallback((projectId: string, title: string, content: string, paperId?: string) => {
+    projectsApi.addNote(projectId, { title, content, paperId }).then((newNote) => {
+      setStoreState((prev) => {
+        const updatedProjects = prev.projects.map((p) => {
+          if (p.id === projectId) return { ...p, notes: [newNote as unknown as import('./mock-data').ProjectNote, ...p.notes] };
+          return p;
+        });
+        return { ...prev, projects: updatedProjects };
       });
-      return { ...prev, projects: updatedProjects };
+    }).catch(() => {
+      const currentUser = getStoreState().user;
+      const papers = getStoreState().papers;
+      const paper = papers.find((p) => p.id === paperId);
+      setStoreState((prev) => {
+        const newNote = {
+          id: 'note-' + Date.now(),
+          title,
+          content,
+          paperId,
+          paperTitle: paper?.title,
+          updatedAt: new Date().toISOString().split('T')[0],
+          authorName: currentUser.name
+        };
+        const updatedProjects = prev.projects.map((p) => {
+          if (p.id === projectId) return { ...p, notes: [newNote, ...p.notes] };
+          return p;
+        });
+        return { ...prev, projects: updatedProjects };
+      });
     });
-  };
+  }, []);
 
-  const addProjectDiscussion = (projectId: string, content: string) => {
+  const addProjectDiscussion = useCallback((projectId: string, content: string) => {
     if (!content.trim()) return;
-    setStoreState((prev) => {
-      const newMsg = {
-        id: 'disc-' + Date.now(),
-        authorName: prev.user.name,
-        authorAvatar: prev.user.avatar,
-        content: content.trim(),
-        timestamp: 'Just now'
-      };
-      const updatedProjects = prev.projects.map((p) => {
-        if (p.id === projectId) {
-          return { ...p, discussions: [...p.discussions, newMsg] };
-        }
-        return p;
+    projectsApi.addDiscussion(projectId, content).then((newMsg) => {
+      setStoreState((prev) => {
+        const updatedProjects = prev.projects.map((p) => {
+          if (p.id === projectId) return { ...p, discussions: [...p.discussions, newMsg as unknown as import('./mock-data').ProjectDiscussion] };
+          return p;
+        });
+        return { ...prev, projects: updatedProjects };
       });
-      return { ...prev, projects: updatedProjects };
+    }).catch(() => {
+      const currentUser = getStoreState().user;
+      setStoreState((prev) => {
+        const newMsg = {
+          id: 'disc-' + Date.now(),
+          authorName: currentUser.name,
+          authorAvatar: currentUser.avatar,
+          content: content.trim(),
+          timestamp: 'Just now'
+        };
+        const updatedProjects = prev.projects.map((p) => {
+          if (p.id === projectId) return { ...p, discussions: [...p.discussions, newMsg] };
+          return p;
+        });
+        return { ...prev, projects: updatedProjects };
+      });
     });
-  };
+  }, []);
 
-  const inviteCollaborator = (projectId: string, email: string, role: 'Owner' | 'Editor' | 'Viewer') => {
-    setStoreState((prev) => {
+  const inviteCollaborator = useCallback((projectId: string, email: string, role: 'Owner' | 'Editor' | 'Viewer') => {
+    projectsApi.inviteMember(projectId, email, role).then((newMember) => {
+      setStoreState((prev) => {
+        const updatedProjects = prev.projects.map((p) => {
+          if (p.id === projectId) return { ...p, members: [...p.members, newMember as unknown as import('./mock-data').WorkspaceProject['members'][0]] };
+          return p;
+        });
+        return { ...prev, projects: updatedProjects };
+      });
+    }).catch(() => {
       const nameFromEmail = email.split('@')[0].replace('.', ' ');
-      const newMember = {
-        name: nameFromEmail.charAt(0).toUpperCase() + nameFromEmail.slice(1),
-        role,
-        email,
-        avatar: `https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=400&auto=format&fit=crop&q=80`
-      };
-      const updatedProjects = prev.projects.map((p) => {
-        if (p.id === projectId) {
-          return { ...p, members: [...p.members, newMember] };
-        }
-        return p;
+      setStoreState((prev) => {
+        const newMember = {
+          name: nameFromEmail.charAt(0).toUpperCase() + nameFromEmail.slice(1),
+          role,
+          email,
+          avatar: `https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=400&auto=format&fit=crop&q=80`
+        };
+        const updatedProjects = prev.projects.map((p) => {
+          if (p.id === projectId) return { ...p, members: [...p.members, newMember] };
+          return p;
+        });
+        return { ...prev, projects: updatedProjects };
       });
-      return { ...prev, projects: updatedProjects };
     });
-  };
+  }, []);
 
-  const markNotificationRead = (id: string) => {
+  const markNotificationRead = useCallback((id: string) => {
+    notificationsApi.markRead(id).catch(() => {});
     setStoreState((prev) => ({
       ...prev,
       notifications: prev.notifications.map((n) => (n.id === id ? { ...n, read: true } : n))
     }));
-  };
+  }, []);
 
-  const markAllNotificationsRead = () => {
+  const markAllNotificationsRead = useCallback(() => {
+    notificationsApi.markAllRead().catch(() => {});
     setStoreState((prev) => ({
       ...prev,
       notifications: prev.notifications.map((n) => ({ ...n, read: true }))
     }));
-  };
+  }, []);
 
-  const toggleVerificationUser = () => {
+  const toggleVerificationUser = useCallback(() => {
     setStoreState((prev) => ({
       ...prev,
       user: { ...prev.user, verified: !prev.user.verified }
     }));
-  };
+  }, []);
 
-  const updateProfile = (updatedProfile: Partial<UserProfile>) => {
-    setStoreState((prev) => ({
-      ...prev,
-      user: { ...prev.user, ...updatedProfile }
-    }));
-  };
+  const updateProfile = useCallback((updatedProfile: Partial<UserProfile>) => {
+    authApi.updateProfile(updatedProfile).then((profile) => {
+      setStoreState((prev) => ({ ...prev, user: profile as unknown as UserProfile }));
+    }).catch(() => {
+      setStoreState((prev) => ({ ...prev, user: { ...prev.user, ...updatedProfile } }));
+    });
+  }, []);
 
-  const addSearchHistory = (query: string) => {
+  const addSearchHistory = useCallback((query: string) => {
     if (!query.trim()) return;
+    searchApi.addHistory(query).catch(() => {});
     setStoreState((prev) => {
       const filtered = prev.searchHistory.filter((q) => q.toLowerCase() !== query.toLowerCase());
       return { ...prev, searchHistory: [query.trim(), ...filtered].slice(0, 10) };
     });
-  };
+  }, []);
 
-  const submitManuscript = (manuscript: ManuscriptSubmission) => {
-    setStoreState((prev) => ({
-      ...prev,
-      manuscripts: [manuscript, ...prev.manuscripts]
-    }));
-  };
+  const submitManuscript = useCallback((manuscript: ManuscriptSubmission) => {
+    manuscriptsApi.create({
+      title: manuscript.title,
+      abstract: manuscript.abstract,
+      authors: manuscript.authors,
+      coAuthors: manuscript.coAuthors,
+      venue: manuscript.venue,
+      tags: manuscript.tags,
+      year: manuscript.year,
+      integrityConfirmed: manuscript.integrityConfirmed,
+    }).then((newMs) => {
+      setStoreState((prev) => ({
+        ...prev,
+        manuscripts: [newMs as unknown as ManuscriptSubmission, ...prev.manuscripts]
+      }));
+    }).catch(() => {
+      setStoreState((prev) => ({
+        ...prev,
+        manuscripts: [manuscript, ...prev.manuscripts]
+      }));
+    });
+  }, []);
 
   return {
     state,
