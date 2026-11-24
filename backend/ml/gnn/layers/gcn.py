@@ -1,24 +1,21 @@
-"""GCN layer — Graph Convolutional Network.
-
-Standard GCN propagation rule:
-    H^(l+1) = σ(Â · H^(l) · W^(l))
-
-Where Â = D̃^(-1/2) · Ã · D̃^(-1/2), Ã = A + I_N
-"""
+"""GCN layer — PyTorch Graph Convolutional Network layer."""
 
 from __future__ import annotations
 
-import numpy as np
+import torch
+import torch.nn as nn
 
 
-class GCNLayer:
-    """Graph Convolutional Network layer (numpy implementation)."""
+class GCNLayer(nn.Module):
+    """Graph Convolutional Network layer: H' = ReLU(A_norm @ H @ W + b)."""
 
     def __init__(self, in_dim: int, out_dim: int) -> None:
-        self.W = np.random.randn(in_dim, out_dim).astype(np.float32) * 0.01
-        self.bias = np.zeros(out_dim, dtype=np.float32)
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+        nn.init.xavier_uniform_(self.linear.weight)
 
-    def forward(self, H: np.ndarray, A_norm: np.ndarray) -> np.ndarray:
-        """Forward pass: H' = σ(A_norm @ H @ W + b)."""
-        out = A_norm @ H @ self.W + self.bias
-        return np.maximum(out, 0)  # ReLU
+    def forward(self, H: torch.Tensor, A_norm: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.linear(A_norm @ H))
+
+
+__all__ = ["GCNLayer"]

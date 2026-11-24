@@ -202,10 +202,15 @@ class SearchService:
             return out
 
         max_rrf = max((r.score for r in ranked), default=1e-9) or 1e-9
+        import math
+
         for r in ranked:
             norm_rrf = r.score / max_rrf
             prior = citation_prior(r.paper.year, r.paper.citation_count)
-            final = _W_RRF * norm_rrf + _W_COSINE * r.cosine + _W_PRIOR * prior
+            base_score = _W_RRF * norm_rrf + _W_COSINE * r.cosine + _W_PRIOR * prior
+            # 6.C Temporal Trend Embedding boost: score *= (1 + 0.12 * sigmoid(year - 2020))
+            recency_sig = 1.0 / (1.0 + math.exp(-(int(r.paper.year or 2020) - 2020)))
+            final = min(0.99, base_score * (1.0 + 0.12 * recency_sig))
             signal = "High" if final >= HIGH else ("Medium" if final >= MEDIUM else "Low")
 
             bits: list[str] = []
@@ -318,6 +323,111 @@ class SearchService:
             if s not in deduped:
                 deduped.append(s)
         return deduped[:limit]
+
+    def explain_paper(self, paper_id: str, query: str, user_id: str) -> dict[str, Any]:
+        """7.1: 'Why This Paper?' provenance explainability panel."""
+        from sqlalchemy import select
+
+        from app.models.collection import Collection, CollectionPaper
+        from app.models.knowledge import KgNode
+        from app.models.paper import Paper, RelatedPaper, SavedPaper
+        from app.models.project import Project, ProjectNote
+
+        paper = self.db.get(Paper, paper_id)
+        if paper is None:
+            return {"paperId": paper_id, "reasons": []}
+
+        reasons: list[dict[str, str]] = []
+        paper_tags = {str(t).lower() for t in (paper.tags or [])}
+        q_terms = {t.lower() for t in query.split() if len(t) > 2}
+
+        # 1. Collection overlap
+        cols = list(self.db.scalars(select(Collection).where(Collection.owner_id == user_id)).all())
+        for c in cols:
+            pids = list(
+                self.db.scalars(
+                    select(CollectionPaper.paper_id).where(CollectionPaper.collection_id == c.id)
+                ).all()
+            )
+            if not pids:
+                continue
+            col_papers = list(self.db.scalars(select(Paper).where(Paper.id.in_(pids))).all())
+            col_tags = {str(t).lower() for cp in col_papers for t in (cp.tags or [])}
+            overlap = sorted(paper_tags & col_tags)
+            if overlap:
+                reasons.append(
+                    {
+                        "source": "collection",
+                        "title": f"Matches your '{c.name}' collection",
+                        "detail": f"Shares concepts ({', '.join(overlap[:3])}) with {len(col_papers)} papers in '{c.name}'.",
+                    }
+                )
+
+        # 2. Related to saved papers
+        saved_ids = set(
+            self.db.scalars(select(SavedPaper.paper_id).where(SavedPaper.user_id == user_id)).all()
+        )
+        if saved_ids:
+            rel_rows = list(
+                self.db.scalars(
+                    select(RelatedPaper).where(
+                        RelatedPaper.paper_id == paper.id,
+                        RelatedPaper.related_to_id.in_(saved_ids),
+                    )
+                ).all()
+            )
+            if rel_rows:
+                reasons.append(
+                    {
+                        "source": "saved_library",
+                        "title": f"Connected to {len(rel_rows)} saved paper(s)",
+                        "detail": f"SPECTER2 cosine k-NN links this paper to {len(rel_rows)} paper(s) already in your library.",
+                    }
+                )
+
+        # 3. KG entities & workspace notes overlap
+        kg_nodes = list(self.db.scalars(select(KgNode).where(KgNode.paper_id == paper.id)).all())
+        proj_ids = list(self.db.scalars(select(Project.id).where(Project.owner_id == user_id)).all())
+        notes = (
+            list(self.db.scalars(select(ProjectNote).where(ProjectNote.project_id.in_(proj_ids))).all())
+            if proj_ids
+            else []
+        )
+        note_blob = " ".join(f"{n.title} {n.content}".lower() for n in notes)
+        shared_entities = [n.canonical_name for n in kg_nodes if n.canonical_name.lower() in note_blob]
+        if shared_entities:
+            reasons.append(
+                {
+                    "source": "workspace_kg",
+                    "title": "Linked to your workspace notes",
+                    "detail": f"KG entities {', '.join(shared_entities[:3])} also appear in your project notes.",
+                }
+            )
+        elif kg_nodes:
+            reasons.append(
+                {
+                    "source": "knowledge_graph",
+                    "title": "Anchored in Knowledge Graph",
+                    "detail": f"Extracts {len(kg_nodes)} scientific entities: {', '.join(n.canonical_name for n in kg_nodes[:4])}.",
+                }
+            )
+
+        # 4. Query term + recency rationale
+        matched_q = [t for t in q_terms if t in paper.title.lower() or t in paper.abstract.lower()]
+        if matched_q:
+            reasons.append(
+                {
+                    "source": "query_match",
+                    "title": "Direct query & temporal match",
+                    "detail": f"Matches '{', '.join(matched_q[:4])}' ({paper.year}, {paper.citation_count:,} citations).",
+                }
+            )
+
+        return {
+            "paperId": paper.id,
+            "title": paper.title,
+            "reasons": reasons,
+        }
 
 
 class PageParamsShim:  # local shim so `_browse` reuses PaperService unchanged

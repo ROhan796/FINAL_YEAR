@@ -227,4 +227,67 @@ def ai_clear(project_id: str, db: DbSession, user: CurrentUserDep) -> Any:
     return OkResponse(ok=True)
 
 
+@router.post("/{project_id}/ai-thread/stream")
+def ai_ask_stream(
+    project_id: str,
+    db: DbSession,
+    user: CurrentUserDep,
+    message: str = Body(embed=True),
+) -> Any:
+    """SSE streaming RAG-grounded assistant turn that persists to project_chat_messages."""
+    import json
+
+    from fastapi.responses import StreamingResponse
+
+    def _stream():
+        for frame in WorkspaceService(db).ask_stream(project_id, user["id"], message):
+            yield f"data: {json.dumps(frame)}\n\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/{project_id}/reading-room")
+def list_reading_annotations(
+    project_id: str,
+    db: ReadDbSession,
+    user: CurrentUserDep,
+    paperId: Annotated[str | None, Query()] = None,  # noqa: N803
+) -> list[dict[str, Any]]:
+    return WorkspaceService(db).reading_annotations(project_id, user["id"], paper_id=paperId)
+
+
+@router.post("/{project_id}/reading-room", status_code=201)
+def add_reading_annotation(
+    project_id: str,
+    db: DbSession,
+    user: CurrentUserDep,
+    paperId: str = Body(...),  # noqa: N803
+    sentenceIndex: int = Body(0),  # noqa: N803
+    highlightText: str = Body(""),  # noqa: N803
+    comment: str = Body(...),
+    chunkId: str | None = Body(None),  # noqa: N803
+) -> dict[str, Any]:
+    return WorkspaceService(db).add_reading_annotation(
+        project_id,
+        user["id"],
+        paper_id=paperId,
+        sentence_index=sentenceIndex,
+        highlight_text=highlightText,
+        comment=comment,
+        chunk_id=chunkId,
+    )
+
+
+@router.delete("/{project_id}/reading-room/{annotation_id}", response_model=OkResponse)
+def delete_reading_annotation(
+    project_id: str, annotation_id: str, db: DbSession, user: CurrentUserDep
+) -> Any:
+    WorkspaceService(db).delete_reading_annotation(project_id, user["id"], annotation_id)
+    return OkResponse(ok=True)
+
+
 __all__ = ["router"]

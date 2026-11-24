@@ -1,27 +1,29 @@
-"""Virtual global node — gives every node global context in 1 hop.
-
-Connected to all nodes, so after 1 layer of message passing, every node
-has information from the entire graph. Combined with L=3 layers, this
-effectively captures long-range dependencies without over-smoothing.
-"""
+"""Virtual global node — PyTorch module for 1-hop global graph context."""
 
 from __future__ import annotations
 
-import numpy as np
+import torch
+import torch.nn as nn
 
 
-class VirtualNode:
-    """Virtual global node for context aggregation."""
+class VirtualNode(nn.Module):
+    """Virtual global node with learnable gated residual broadcast."""
 
     def __init__(self, dim: int) -> None:
+        super().__init__()
         self.dim = dim
-        self.embedding = np.zeros(dim, dtype=np.float32)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+            nn.ReLU(),
+        )
+        self.gate = nn.Parameter(torch.tensor(0.1))
 
-    def aggregate(self, H: np.ndarray) -> np.ndarray:
-        """Update virtual node embedding from all node embeddings."""
-        self.embedding = H.mean(axis=0)
-        return self.embedding
+    def forward(self, H: torch.Tensor) -> torch.Tensor:
+        if H.size(0) == 0:
+            return H
+        global_ctx = self.mlp(H.mean(dim=0, keepdim=True))  # (1, dim)
+        return H + self.gate * global_ctx.expand_as(H)
 
-    def broadcast(self, num_nodes: int) -> np.ndarray:
-        """Broadcast virtual node embedding to all nodes."""
-        return np.tile(self.embedding, (num_nodes, 1))
+
+__all__ = ["VirtualNode"]

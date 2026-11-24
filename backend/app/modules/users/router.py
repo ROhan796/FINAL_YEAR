@@ -31,6 +31,14 @@ def me(db: ReadDbSession, user: CurrentUserDep) -> Any:
     return AuthService.profile_out(row, profile)
 
 
+@router.get("/me/velocity")
+def my_velocity(db: ReadDbSession, user: CurrentUserDep) -> dict[str, Any]:
+    """7.7: Self-reflective Research Velocity Dashboard metrics."""
+    from app.modules.insights.service import InsightsService
+
+    return InsightsService(db).research_velocity(user["id"])
+
+
 @router.patch("/me", response_model=UserProfileOut)
 def update_me(db: DbSession, user: CurrentUserDep, payload: ProfileUpdate) -> Any:
     """SettingsView sends name/title/institution/bio — `name` maps to User.full_name."""

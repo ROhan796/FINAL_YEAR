@@ -20,6 +20,7 @@ from app.models.project import (
     ProjectPaper,
     ProjectTask,
     ProjectTimeEntry,
+    ReadingAnnotation,
 )
 from app.models.social import (
     FeedComment,
@@ -56,6 +57,7 @@ __all__ = [
     "ProjectPaper",
     "ProjectTask",
     "ProjectTimeEntry",
+    "ReadingAnnotation",
     "RelatedPaper",
     "ResearcherProfile",
     "SavedPaper",

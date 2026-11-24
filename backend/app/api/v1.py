@@ -15,6 +15,8 @@ from app.modules.auth.router import router as auth_router
 from app.modules.collections.router import router as collections_router
 from app.modules.feed.router import router as feed_router
 from app.modules.graph.router import router as graph_router
+from app.modules.ingestion.router import router as ingestion_router
+from app.modules.insights.router import router as insights_router
 from app.modules.network.router import router as network_router
 from app.modules.notifications.router import router as notifications_router
 from app.modules.papers.router import router as papers_router
@@ -42,6 +44,8 @@ v1.include_router(publishing_router)
 v1.include_router(notifications_router)
 v1.include_router(trending_router)
 v1.include_router(graph_router)
+v1.include_router(ingestion_router)
+v1.include_router(insights_router)
 
 #: Frozen prototype routes — paths and shapes must never change.
 legacy = APIRouter()

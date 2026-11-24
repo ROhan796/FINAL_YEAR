@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Search, Sparkles, Zap, Filter, RotateCcw, ArrowRight, History, ShieldAlert } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Search, Sparkles, Zap, Filter, RotateCcw, ArrowRight, History, ShieldAlert, HelpCircle, X } from 'lucide-react';
 import { usePlatformStore } from '@/lib/platform-store';
 import { PaperCard } from '../PaperCard';
 import { Paper } from '@/lib/mock-data';
-import { searchApi } from '@/lib/api';
+import { insightsApi, searchApi } from '@/lib/api';
+import type { PaperExplainability } from '@/lib/api/insights';
 
 interface SearchViewProps {
   onOpenPaperDetail: (paper: Paper) => void;
@@ -40,6 +41,17 @@ export const SearchView: React.FC<SearchViewProps> = ({
   const [openAccessOnly, setOpenAccessOnly] = useState(false);
   const [minCitations, setMinCitations] = useState(0);
   const [yearFilter, setYearFilter] = useState<'All' | '2026' | '2025' | '2024'>('All');
+  const [explainData, setExplainData] = useState<PaperExplainability | null>(null);
+
+  useEffect(() => {
+    setResults(papers);
+  }, [papers]);
+
+  useEffect(() => {
+    searchApi.getSuggestions(4).then((s) => {
+      if (s?.length) setSuggestedSearches(s);
+    }).catch(() => {});
+  }, []);
 
   const executeSearch = async (searchQuery: string) => {
     if (!searchQuery.trim()) return;
@@ -50,6 +62,12 @@ export const SearchView: React.FC<SearchViewProps> = ({
       const data = await searchApi.search(searchQuery, {
         mode: searchMode,
         limit: 20,
+        filters: {
+          openAccess: openAccessOnly ? true : undefined,
+          minCitations: minCitations > 0 ? minCitations : undefined,
+          year: yearFilter !== 'All' ? Number(yearFilter) : undefined,
+        },
+        isHttpAccelerated,
       });
       setResults(data.results as unknown as Paper[]);
       setSearchLatency(data.latencyMs);
@@ -61,6 +79,25 @@ export const SearchView: React.FC<SearchViewProps> = ({
       console.error('Search API error:', e);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleExplainPaper = async (paper: Paper) => {
+    try {
+      const exp = await insightsApi.explainPaper(paper.id, query);
+      setExplainData(exp);
+    } catch {
+      setExplainData({
+        paperId: paper.id,
+        title: paper.title,
+        reasons: [
+          {
+            source: 'query_match',
+            title: 'Matched paper metadata',
+            detail: paper.reasoningEvidence || `Matches ${paper.tags.slice(0, 3).join(', ')}.`,
+          },
+        ],
+      });
     }
   };
 
@@ -294,17 +331,49 @@ export const SearchView: React.FC<SearchViewProps> = ({
       </div>
 
       {/* Results List */}
+      {explainData && (
+        <div className="bg-[#f5e3c7] border border-[#d97757] rounded-2xl p-5 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-sans text-xs font-bold uppercase tracking-wider text-[#d97757] flex items-center gap-1.5">
+              <HelpCircle className="w-4 h-4" /> Why This Paper? — Provenance Breakdown
+            </span>
+            <button onClick={() => setExplainData(null)} className="p-1 hover:bg-[#e3dacc] rounded cursor-pointer">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="font-serif text-base font-medium text-[#141413]">{explainData.title}</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            {explainData.reasons.map((r, i) => (
+              <div key={i} className="bg-[#faf9f5] border border-[#cccbc8] rounded-xl p-3 font-sans text-xs">
+                <div className="font-bold text-[#141413]">{r.title}</div>
+                <div className="text-[#87867f] mt-0.5">{r.detail}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {filteredResults.length > 0 ? (
         <div className="space-y-6">
           {filteredResults.map((paper) => (
-            <PaperCard
-              key={paper.id}
-              paper={paper}
-              onOpenDetail={onOpenPaperDetail}
-              onOpenCite={onOpenCite}
-              onOpenAddToCollection={onOpenAddToCollection}
-              showRelevanceSignal={true}
-            />
+            <div key={paper.id} className="space-y-1.5">
+              <PaperCard
+                paper={paper}
+                onOpenDetail={onOpenPaperDetail}
+                onOpenCite={onOpenCite}
+                onOpenAddToCollection={onOpenAddToCollection}
+                showRelevanceSignal={true}
+              />
+              <div className="flex justify-end px-2">
+                <button
+                  onClick={() => handleExplainPaper(paper)}
+                  className="font-sans text-[11px] text-[#d97757] hover:underline flex items-center gap-1 cursor-pointer"
+                >
+                  <HelpCircle className="w-3.5 h-3.5" />
+                  <span>Why this paper?</span>
+                </button>
+              </div>
+            </div>
           ))}
         </div>
       ) : (

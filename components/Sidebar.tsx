@@ -14,7 +14,8 @@ import {
   Upload,
   Settings,
   Sparkles,
-  Plus
+  Plus,
+  GitBranch
 } from 'lucide-react';
 import { usePlatformStore } from '@/lib/platform-store';
 
@@ -38,9 +39,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const { user } = usePlatformStore();
 
   const pathToTabMap: Record<string, string> = {
-    '/': 'feed',
+    '/feed': 'feed',
     '/search': 'search',
     '/discover': 'discover',
+    '/graph': 'graph',
     '/workspace': 'workspace',
     '/collections': 'collections',
     '/saved': 'saved',
@@ -61,9 +63,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const navItems = [
-    { id: 'feed', label: 'Research Feed', icon: Rss, badge: null, href: '/' },
+    { id: 'feed', label: 'Research Feed', icon: Rss, badge: null, href: '/feed' },
     { id: 'search', label: 'AI Semantic Search', icon: Search, badge: null, href: '/search' },
     { id: 'discover', label: 'Paper Discovery', icon: Compass, badge: null, href: '/discover' },
+    { id: 'graph', label: 'Knowledge Graph & Discovery', icon: GitBranch, badge: 'GNN', href: '/graph' },
     { id: 'workspace', label: 'Research Workspace', icon: FolderKanban, badge: null, href: '/workspace' },
     { id: 'collections', label: 'Collections', icon: Bookmark, badge: null, href: '/collections' },
     { id: 'saved', label: 'Saved Papers', icon: Library, badge: null, href: '/saved' },

@@ -1,70 +1,70 @@
-"""GAT layer — Graph Attention Network.
-
-Attention coefficient:
-    e_vu = LeakyReLU(a^T [W·h_v || W·h_u])
-
-Normalized attention:
-    α_vu = exp(e_vu) / Σ_k exp(e_vk)
-
-Multi-head update:
-    h_v' = ||_k σ(Σ_u α_vu^(k) W^(k) h_u)
-"""
+"""GAT layer — PyTorch Multi-Head Graph Attention Network layer."""
 
 from __future__ import annotations
 
-import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
-class GATLayer:
-    """Graph Attention Network layer with multi-head attention (numpy)."""
+class GATLayer(nn.Module):
+    """Multi-head Graph Attention Network layer (PyTorch)."""
 
     def __init__(self, in_dim: int, out_dim: int, num_heads: int = 8) -> None:
+        super().__init__()
         self.num_heads = num_heads
+        assert out_dim % num_heads == 0, "out_dim must be divisible by num_heads"
         self.head_dim = out_dim // num_heads
-        assert out_dim % num_heads == 0
 
-        # Shared projection
-        self.W = np.random.randn(in_dim, out_dim).astype(np.float32) * 0.01
-        # Attention vector per head
-        self.a = np.random.randn(num_heads, 2 * self.head_dim).astype(np.float32) * 0.01
-        self.leaky_relu_slope = 0.2
+        self.proj = nn.Linear(in_dim, out_dim, bias=False)
+        self.attn = nn.Parameter(torch.empty(num_heads, 2 * self.head_dim))
+        self.leaky_relu = nn.LeakyReLU(0.2)
 
-    def forward(self, H: np.ndarray, adj_list: list[list[int]], num_nodes: int) -> np.ndarray:
-        """Forward pass with neighbor lists."""
-        N = num_nodes
-        K = self.num_heads
-        d = self.head_dim
+        nn.init.xavier_uniform_(self.proj.weight)
+        nn.init.xavier_uniform_(self.attn)
 
-        # Project: (N, in_dim) -> (N, K, d)
-        projected = (H @ self.W).reshape(N, K, d)
-        out = np.zeros((N, K, d), dtype=np.float32)
+    def forward(
+        self,
+        H: torch.Tensor,
+        adj_list: list[list[int]] | None,
+        num_nodes: int,
+    ) -> torch.Tensor:
+        if adj_list is None or num_nodes == 0:
+            return F.elu(self.proj(H))
 
-        for v in range(N):
-            neighbors = adj_list[v] if v < len(adj_list) else []
-            if not neighbors:
-                continue
+        K, d = self.num_heads, self.head_dim
+        projected = self.proj(H).view(num_nodes, K, d)  # (N, K, d)
 
-            # Compute attention scores
-            h_v = projected[v]  # (K, d)
-            scores = []
-            for u in neighbors:
-                h_u = projected[u]  # (K, d)
-                # a^T [W·h_v || W·h_u] for each head
-                concat = np.concatenate([h_v, h_u], axis=-1)  # (K, 2d)
-                e = np.sum(self.a * concat, axis=-1)  # (K,)
-                e = np.maximum(e * self.leaky_relu_slope, 0)  # LeakyReLU
-                scores.append(e)
+        edges_src: list[int] = []
+        edges_dst: list[int] = []
+        for v in range(min(num_nodes, len(adj_list))):
+            for u in adj_list[v]:
+                if 0 <= u < num_nodes:
+                    edges_src.append(u)
+                    edges_dst.append(v)
 
-            scores = np.stack(scores, axis=-1)  # (K, num_neighbors)
-            # Softmax over neighbors
-            scores_max = scores.max(axis=-1, keepdims=True)
-            exp_scores = np.exp(scores - scores_max)
-            alpha = exp_scores / (exp_scores.sum(axis=-1, keepdims=True) + 1e-9)
+        if not edges_src:
+            return F.elu(projected.view(num_nodes, K * d))
 
-            # Weighted sum
-            neighbor_stack = np.stack([projected[u] for u in neighbors], axis=0)  # (num_neighbors, K, d)
-            alpha_expanded = alpha[:, :, np.newaxis]  # (K, num_neighbors, 1)
-            out[v] = (alpha_expanded * neighbor_stack).sum(axis=0)  # (K, d)
+        device = H.device
+        src = torch.tensor(edges_src, dtype=torch.long, device=device)
+        dst = torch.tensor(edges_dst, dtype=torch.long, device=device)
 
-        out = np.maximum(out, 0)  # ReLU
-        return out.reshape(N, -1)  # (N, K*d)
+        h_src = projected[src]  # (E, K, d)
+        h_dst = projected[dst]  # (E, K, d)
+        cat = torch.cat([h_dst, h_src], dim=-1)  # (E, K, 2d)
+        e = self.leaky_relu((cat * self.attn.unsqueeze(0)).sum(dim=-1))  # (E, K)
+
+        # Numerically stable segment softmax per destination node & head
+        e_exp = torch.exp(e - e.max(dim=0, keepdim=True).values)
+        denom = torch.zeros((num_nodes, K), dtype=H.dtype, device=device)
+        denom.index_add_(0, dst, e_exp)
+        alpha = e_exp / denom[dst].clamp(min=1e-9)  # (E, K)
+
+        weighted = h_src * alpha.unsqueeze(-1)  # (E, K, d)
+        out = torch.zeros((num_nodes, K, d), dtype=H.dtype, device=device)
+        out.index_add_(0, dst, weighted)
+        return F.elu(out.view(num_nodes, K * d))
+
+
+__all__ = ["GATLayer"]

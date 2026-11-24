@@ -78,4 +78,15 @@ def suggestions(
     return SearchService(db).personalised_suggestions(user["id"], interests, limit)
 
 
+@router.get("/explain/{paper_id}")
+def explain_paper(
+    paper_id: str,
+    db: ReadDbSession,
+    user: CurrentUserDep,
+    q: Annotated[str, Query(max_length=500)] = "",
+) -> dict[str, Any]:
+    """7.1: 'Why This Paper?' provenance explainability sidebar payload."""
+    return SearchService(db).explain_paper(paper_id, q, user["id"])
+
+
 __all__ = ["router", "PaperFilters"]

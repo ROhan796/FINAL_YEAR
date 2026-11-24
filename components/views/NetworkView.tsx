@@ -1,14 +1,20 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Users, ShieldCheck, BookOpen, Award, UserPlus, Check, ExternalLink } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Users, ShieldCheck, BookOpen, Award, UserPlus, Check, Sparkles } from 'lucide-react';
 import { usePlatformStore } from '@/lib/platform-store';
 import { Researcher } from '@/lib/mock-data';
+import { insightsApi } from '@/lib/api';
+import type { ResearcherAffinity } from '@/lib/api/insights';
 
 export const NetworkView: React.FC = () => {
   const { researchers, toggleFollowResearcher } = usePlatformStore();
   const [selectedField, setSelectedField] = useState<string>('All');
-  const [selectedResearcher, setSelectedResearcher] = useState<Researcher | null>(null);
+  const [affinityMap, setAffinityMap] = useState<Record<string, ResearcherAffinity>>({});
+
+  useEffect(() => {
+    insightsApi.affinity().then(setAffinityMap).catch(() => setAffinityMap({}));
+  }, [researchers.length]);
 
   const fields = ['All', 'Artificial Intelligence', 'Quantum Materials', 'Genomics & Oncology', 'Condensed Physics'];
 
@@ -95,6 +101,21 @@ export const NetworkView: React.FC = () => {
               <p className="font-serif text-xs text-[#141413]/80 line-clamp-3 leading-relaxed">
                 {r.bio}
               </p>
+
+              {/* 7.5 Collaboration Affinity Score */}
+              {affinityMap[r.id] && (
+                <div className="bg-[#f0eee6] border border-[#cccbc8] rounded-xl p-2.5 font-sans text-[11px] space-y-0.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-[#d97757] flex items-center gap-1">
+                      <Sparkles className="w-3 h-3" /> {affinityMap[r.id].tier} Research Affinity
+                    </span>
+                    <span className="font-mono font-bold text-[#141413]">
+                      {affinityMap[r.id].affinityScore}%
+                    </span>
+                  </div>
+                  <div className="text-[#87867f] line-clamp-1">{affinityMap[r.id].reason}</div>
+                </div>
+              )}
             </div>
 
             {/* Metrics Footer */}

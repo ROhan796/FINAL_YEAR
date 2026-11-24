@@ -45,4 +45,29 @@ export const graphApi = {
 
   feedback: (discoveryId: string, useful: boolean) =>
     api.post<Discovery>(`/api/v1/discoveries/${discoveryId}/feedback`, { useful }),
+
+  retrain: (trainGnn: boolean = true, epochs: number = 25) =>
+    api.post<{
+      modelTrained: boolean;
+      discoveriesCount: number;
+      persisted: number;
+      hitsAt10: number;
+      mrr: number;
+    }>('/api/v1/discoveries/retrain', undefined, { params: { trainGnn, epochs } }),
+
+  projectionStatus: () =>
+    api.get<{
+      neo4jEnabled: boolean;
+      lastProjectedAt: string | null;
+      nodesProjected: number;
+      edgesProjected: number;
+      error: string | null;
+    }>('/api/v1/graph/projection-status'),
+
+  projectToNeo4j: (full: boolean = false) =>
+    api.post<{ status: string; nodesProjected: number; edgesProjected: number; error: string | null }>(
+      '/api/v1/graph/project',
+      undefined,
+      { params: { full } },
+    ),
 };

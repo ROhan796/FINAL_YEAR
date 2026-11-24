@@ -1,9 +1,10 @@
 'use client';
 
-import React from 'react';
-import { Upload, Sparkles, FileText, CheckCircle2, Clock, AlertCircle, ShieldCheck } from 'lucide-react';
+import React, { useState } from 'react';
+import { Upload, Sparkles, FileText, Clock, AlertCircle, ShieldCheck, SearchCheck } from 'lucide-react';
 import { usePlatformStore } from '@/lib/platform-store';
-import { AIPreReviewPanel } from '../AIPreReviewPanel';
+import { insightsApi } from '@/lib/api';
+import type { CitationGapsOut } from '@/lib/api/insights';
 
 interface PublishViewProps {
   onOpenNewManuscript: () => void;
@@ -15,6 +16,20 @@ export const PublishView: React.FC<PublishViewProps> = ({
   onOpenVerification
 }) => {
   const { user, manuscripts } = usePlatformStore();
+  const [gapsById, setGapsById] = useState<Record<string, CitationGapsOut>>({});
+  const [checkingId, setCheckingId] = useState<string | null>(null);
+
+  const handleCheckCitationGaps = async (msId: string) => {
+    setCheckingId(msId);
+    try {
+      const res = await insightsApi.manuscriptCitationGaps(msId);
+      setGapsById((prev) => ({ ...prev, [msId]: res }));
+    } catch (err) {
+      console.error('Citation gap check failed:', err);
+    } finally {
+      setCheckingId(null);
+    }
+  };
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-12">
@@ -117,6 +132,41 @@ export const PublishView: React.FC<PublishViewProps> = ({
                 </p>
               </div>
             )}
+
+            {/* 7.4 Manuscript-to-Citation Gap Detector */}
+            <div className="pt-2 border-t border-[#cccbc8]/60 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-sans text-xs text-[#87867f]">
+                  Automated NER check for methods mentioned without citations
+                </span>
+                <button
+                  onClick={() => handleCheckCitationGaps(ms.id)}
+                  disabled={checkingId === ms.id}
+                  className="btn-outlined-dark text-xs py-1.5 px-3 flex items-center gap-1.5"
+                >
+                  <SearchCheck className="w-3.5 h-3.5 text-[#d97757]" />
+                  <span>{checkingId === ms.id ? 'Scanning...' : 'Detect Citation Gaps'}</span>
+                </button>
+              </div>
+
+              {gapsById[ms.id] && (
+                <div className="bg-[#f5e3c7] border border-[#cccbc8] rounded-xl p-4 space-y-2 font-sans text-xs">
+                  <div className="font-bold text-[#141413]">
+                    Found {gapsById[ms.id].gapCount} potential uncited method(s)
+                  </div>
+                  {gapsById[ms.id].gaps.map((g, gi) => (
+                    <div key={gi} className="bg-[#faf9f5] border border-[#cccbc8] rounded-lg p-2.5 space-y-1">
+                      <div className="font-semibold text-[#d97757]">{g.message}</div>
+                      {g.candidates.length > 0 && (
+                        <div className="text-[11px] text-[#87867f]">
+                          Candidates: {g.candidates.map((c) => `${c.title} (${c.year})`).join(' • ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         ))}
 

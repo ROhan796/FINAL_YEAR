@@ -1,9 +1,11 @@
 'use client';
 
-import React, { useState } from 'react';
-import { X, Sparkles, Bookmark, BookmarkCheck, Quote, FolderPlus, ExternalLink, RefreshCw, Layers, Check, AlertCircle } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, Sparkles, Bookmark, BookmarkCheck, Quote, FolderPlus, ExternalLink, RefreshCw, Layers, Check, AlertCircle, Scale } from 'lucide-react';
 import { Paper } from '@/lib/mock-data';
 import { usePlatformStore } from '@/lib/platform-store';
+import { insightsApi, papersApi } from '@/lib/api';
+import type { CitationPolarityOut } from '@/lib/api/insights';
 
 interface PaperDetailModalProps {
   paper: Paper | null;
@@ -30,6 +32,20 @@ export const PaperDetailModal: React.FC<PaperDetailModalProps> = ({
     researchGaps?: string[];
     citationContext?: string;
   } | null>(null);
+  const [apiRelated, setApiRelated] = useState<Paper[] | null>(null);
+  const [citSentence, setCitSentence] = useState('');
+  const [polarity, setPolarity] = useState<CitationPolarityOut | null>(null);
+  const [checkingPolarity, setCheckingPolarity] = useState(false);
+
+  useEffect(() => {
+    if (!paper) return;
+    setCurrentSummary(null);
+    setCurrentInsights(null);
+    setPolarity(null);
+    papersApi.getRelated(paper.id).then((res) => {
+      if (res?.length) setApiRelated(res as unknown as Paper[]);
+    }).catch(() => setApiRelated(null));
+  }, [paper]);
 
   if (!paper) return null;
 
@@ -89,7 +105,18 @@ export const PaperDetailModal: React.FC<PaperDetailModalProps> = ({
     }
   };
 
-  const relatedPapers = papers.filter((p) => p.id !== paper.id).slice(0, 3);
+  const handleCheckPolarity = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCheckingPolarity(true);
+    try {
+      const res = await insightsApi.citationPolarity(paper.id, citSentence);
+      setPolarity(res);
+    } finally {
+      setCheckingPolarity(false);
+    }
+  };
+
+  const relatedPapers = (apiRelated && apiRelated.length > 0) ? apiRelated : papers.filter((p) => p.id !== paper.id).slice(0, 3);
 
   return (
     <div className="fixed inset-0 z-50 bg-[#141413]/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
@@ -275,6 +302,48 @@ export const PaperDetailModal: React.FC<PaperDetailModalProps> = ({
           <p className="font-serif text-sm text-[#141413]/90 leading-relaxed italic">
             "{paper.abstract}"
           </p>
+        </div>
+
+        {/* 6.A Citation Polarity Classifier */}
+        <div className="bg-[#f0eee6] border border-[#cccbc8] rounded-2xl p-4 space-y-3">
+          <div className="flex items-center gap-2 font-sans text-xs font-bold uppercase tracking-wider text-[#141413]">
+            <Scale className="w-4 h-4 text-[#d97757]" />
+            <span>Citation Polarity Classifier (Supports / Disputes / Neutral)</span>
+          </div>
+          <form onSubmit={handleCheckPolarity} className="flex items-center gap-2 flex-wrap">
+            <input
+              type="text"
+              value={citSentence}
+              onChange={(e) => setCitSentence(e.target.value)}
+              placeholder="Paste a citing sentence to classify stance against this paper..."
+              className="flex-1 min-w-[220px] p-2 bg-[#faf9f5] border border-[#cccbc8] rounded-xl text-xs font-sans"
+            />
+            <button type="submit" disabled={checkingPolarity} className="btn-clay text-xs py-2 px-4">
+              {checkingPolarity ? 'Classifying...' : 'Classify Stance'}
+            </button>
+          </form>
+          {polarity && (
+            <div className="bg-[#faf9f5] border border-[#cccbc8] rounded-xl p-3 font-sans text-xs space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-bold uppercase">
+                  Verdict:{' '}
+                  <span className={
+                    polarity.label === 'supports'
+                      ? 'text-emerald-700'
+                      : polarity.label === 'disputes'
+                      ? 'text-rose-700'
+                      : 'text-[#141413]'
+                  }>
+                    {polarity.label}
+                  </span>
+                </span>
+                <span className="font-mono text-[#87867f]">
+                  Confidence {(polarity.confidence * 100).toFixed(1)}% ({polarity.modelUsed})
+                </span>
+              </div>
+              <p className="text-[#87867f]">{polarity.evidence}</p>
+            </div>
+          )}
         </div>
 
         {/* Related Papers */}

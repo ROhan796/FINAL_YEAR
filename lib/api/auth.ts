@@ -47,7 +47,7 @@ export const authApi = {
     }),
 
   logout: () => {
-    clearTokens();
+    clearTokens(true);
   },
 
   getMe: () => api.get<UserProfile>('/api/v1/users/me'),

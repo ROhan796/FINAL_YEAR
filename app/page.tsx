@@ -1,18 +1,8 @@
 'use client';
 
 import React from 'react';
-import { FeedView } from '@/components/views/FeedView';
-import { useModals } from '@/components/ClientShell';
+import { LandingView } from '@/components/views/LandingView';
 
 export default function Home() {
-  const { setDetailPaper, setCitePaper, setAddToColPaper, setIsNewPostOpen } = useModals();
-
-  return (
-    <FeedView
-      onOpenPaperDetail={setDetailPaper}
-      onOpenCite={setCitePaper}
-      onOpenAddToCollection={setAddToColPaper}
-      onOpenNewPost={() => setIsNewPostOpen(true)}
-    />
-  );
+  return <LandingView />;
 }

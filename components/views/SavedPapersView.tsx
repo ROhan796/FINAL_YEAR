@@ -1,10 +1,12 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Library, Search, Download } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Library, Search, Clock } from 'lucide-react';
 import { usePlatformStore } from '@/lib/platform-store';
 import { PaperCard } from '../PaperCard';
 import { Paper } from '@/lib/mock-data';
+import { insightsApi } from '@/lib/api';
+import type { ResearchDebtResponse } from '@/lib/api/insights';
 
 interface SavedPapersViewProps {
   onOpenPaperDetail: (paper: Paper) => void;
@@ -19,6 +21,11 @@ export const SavedPapersView: React.FC<SavedPapersViewProps> = ({
 }) => {
   const { savedPaperIds, papers } = usePlatformStore();
   const [filterQuery, setFilterQuery] = useState('');
+  const [debt, setDebt] = useState<ResearchDebtResponse | null>(null);
+
+  useEffect(() => {
+    insightsApi.researchDebt(30).then(setDebt).catch(() => setDebt(null));
+  }, [savedPaperIds.length]);
 
   const savedPapers = papers.filter((p) => savedPaperIds.includes(p.id));
   const filtered = savedPapers.filter(
@@ -45,6 +52,28 @@ export const SavedPapersView: React.FC<SavedPapersViewProps> = ({
           </p>
         </div>
       </div>
+
+      {/* 7.2 Research Debt Tracker */}
+      {debt && debt.debtCount > 0 && (
+        <div className="bg-[#faf9f5] border border-[#d97757]/50 rounded-2xl p-5 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <span className="font-sans text-xs font-bold uppercase tracking-wider text-[#d97757] flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5" /> Research Debt Tracker
+            </span>
+            <span className="font-sans text-xs text-[#87867f]">
+              {debt.debtCount} unread/unannotated • {debt.overdueCount} aging (30+ days)
+            </span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            {debt.items.slice(0, 4).map((item) => (
+              <div key={item.paperId} className="bg-[#f0eee6] border border-[#cccbc8] rounded-xl p-3 font-sans text-xs">
+                <div className="font-serif font-medium text-[#141413] line-clamp-1">{item.title}</div>
+                <div className="text-[11px] text-[#87867f] mt-0.5">{item.debtReason}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Filter Input */}
       <div className="bg-[#faf9f5] border border-[#cccbc8] rounded-2xl p-4 flex items-center gap-3">

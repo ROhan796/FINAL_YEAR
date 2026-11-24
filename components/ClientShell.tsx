@@ -1,9 +1,12 @@
 'use client';
 
 import React, { createContext, useContext, useState } from 'react';
+import { usePathname } from 'next/navigation';
+import { AlertTriangle, RefreshCw, WifiOff, X } from 'lucide-react';
 import { Navbar } from '@/components/Navbar';
 import { Sidebar } from '@/components/Sidebar';
 import { Paper } from '@/lib/mock-data';
+import { usePlatformStore } from '@/lib/platform-store';
 
 // Modals
 import { PaperDetailModal } from '@/components/PaperDetailModal';
@@ -44,6 +47,10 @@ export function useModals() {
 }
 
 export function ClientShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const isPublicRoute = pathname === '/' || pathname === '/login' || pathname === '/register';
+  const { backendStatus, syncError, writeError, retrySync, clearWriteError } = usePlatformStore();
+
   const [detailPaper, setDetailPaper] = useState<Paper | null>(null);
   const [citePaper, setCitePaper] = useState<Paper | null>(null);
   const [addToColPaper, setAddToColPaper] = useState<Paper | null>(null);
@@ -53,6 +60,33 @@ export function ClientShell({ children }: { children: React.ReactNode }) {
   const [isNewManuscriptOpen, setIsNewManuscriptOpen] = useState<boolean>(false);
   const [isVerificationOpen, setIsVerificationOpen] = useState<boolean>(false);
   const [isHttpAccelerated, setIsHttpAccelerated] = useState<boolean>(true);
+
+  if (isPublicRoute) {
+    return (
+      <ModalContext.Provider
+        value={{
+          detailPaper,
+          setDetailPaper,
+          citePaper,
+          setCitePaper,
+          addToColPaper,
+          setAddToColPaper,
+          isNewPostOpen,
+          setIsNewPostOpen,
+          isNewProjectOpen,
+          setIsNewProjectOpen,
+          isNewManuscriptOpen,
+          setIsNewManuscriptOpen,
+          isVerificationOpen,
+          setIsVerificationOpen,
+          isHttpAccelerated,
+          setIsHttpAccelerated
+        }}
+      >
+        {children}
+      </ModalContext.Provider>
+    );
+  }
 
   return (
     <ModalContext.Provider
@@ -82,6 +116,37 @@ export function ClientShell({ children }: { children: React.ReactNode }) {
           isHttpAccelerated={isHttpAccelerated}
           setIsHttpAccelerated={setIsHttpAccelerated}
         />
+
+        {/* Connection / Sync Status Banner */}
+        {backendStatus === 'demo' && (
+          <div className="bg-amber-50 border-b border-amber-200 px-4 md:px-8 py-2 flex items-center justify-between gap-4 font-sans text-xs text-amber-900">
+            <div className="flex items-center gap-2">
+              <WifiOff className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+              <span>
+                <strong>Using demo data:</strong> Backend API unreachable{syncError ? ` (${syncError})` : ''}. Changes are persisted locally until reconnected.
+              </span>
+            </div>
+            <button
+              onClick={() => retrySync()}
+              className="px-2.5 py-1 rounded-lg bg-amber-900 text-white font-semibold flex items-center gap-1 hover:bg-amber-800 cursor-pointer shrink-0"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Retry</span>
+            </button>
+          </div>
+        )}
+
+        {writeError && (
+          <div className="bg-rose-50 border-b border-rose-200 px-4 md:px-8 py-2 flex items-center justify-between gap-4 font-sans text-xs text-rose-900">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-3.5 h-3.5 text-rose-700 shrink-0" />
+              <span>{writeError}</span>
+            </div>
+            <button onClick={clearWriteError} className="p-1 hover:bg-rose-100 rounded cursor-pointer">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {/* Main Body Layout */}
         <div className="flex-1 flex overflow-hidden">

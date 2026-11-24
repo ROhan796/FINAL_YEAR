@@ -99,6 +99,35 @@ def analyze_paper(
     return PaperService(db).analyze(paper_id, force=force)
 
 
+@router.post("/{paper_id}/citation-polarity")
+def citation_polarity(
+    paper_id: str,
+    db: ReadDbSession,
+    citationSentence: Annotated[str, Query(max_length=2000)] = "",
+) -> dict[str, Any]:
+    """6.A: Classify whether a citing sentence supports, disputes, or neutrally cites this paper."""
+    from pathlib import Path
+    from app.core.config import settings
+    from ml.relation.citation_polarity import CitationPolarityClassifier
+
+    paper = PaperService(db).get(paper_id)
+    sentence = citationSentence.strip() or (
+        f"Building upon {paper.title}, recent work validates its empirical findings."
+    )
+    ckpt = Path(settings.ml_checkpoint_dir) / "citation_polarity.pt"
+    clf = CitationPolarityClassifier(ckpt if ckpt.exists() else None)
+    res = clf.classify(sentence, paper.abstract)
+    return {
+        "paperId": paper.id,
+        "citationSentence": sentence,
+        "label": res.label,
+        "confidence": res.confidence,
+        "probabilities": res.probabilities,
+        "evidence": res.evidence,
+        "modelUsed": res.model_used,
+    }
+
+
 saved_router = APIRouter(tags=["papers"])
 
 

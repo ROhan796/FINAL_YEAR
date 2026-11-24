@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Sparkles, Bell, ShieldCheck, Zap, User as UserIcon } from 'lucide-react';
+import { Sparkles, Bell, ShieldCheck, Zap, LogOut } from 'lucide-react';
 import { usePlatformStore } from '@/lib/platform-store';
 
 interface NavbarProps {
@@ -22,7 +22,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   setIsHttpAccelerated
 }) => {
   const router = useRouter();
-  const { user, notifications } = usePlatformStore();
+  const { user, notifications, backendStatus, logout } = usePlatformStore();
   const unreadCount = notifications.filter((n) => !n.read).length;
 
   const handleNav = (path: string, tabId: string) => {
@@ -114,6 +114,28 @@ export const Navbar: React.FC<NavbarProps> = ({
           <span className="hidden lg:inline font-sans text-xs font-semibold text-[#141413]">
             {user.name.split(' ')[0]}
           </span>
+          <span
+            title={`Backend: ${backendStatus}`}
+            className={`w-2 h-2 rounded-full ${
+              backendStatus === 'live'
+                ? 'bg-emerald-500'
+                : backendStatus === 'connecting'
+                ? 'bg-amber-400 animate-pulse'
+                : 'bg-rose-500'
+            }`}
+          />
+        </button>
+
+        {/* Sign out */}
+        <button
+          onClick={() => {
+            logout();
+            router.push('/login');
+          }}
+          title="Sign out"
+          className="p-2 rounded-xl border border-[#cccbc8] bg-[#faf9f5] hover:bg-[#e3dacc] text-[#87867f] hover:text-[#141413] transition-colors cursor-pointer"
+        >
+          <LogOut className="w-4 h-4" />
         </button>
       </div>
     </header>

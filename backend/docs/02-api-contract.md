@@ -230,14 +230,35 @@ Server emits notifications on: new comment on your post, follow, project invite,
 
 ---
 
-## 10. Trending & Graph
+## 10. Trending, Graph, Ingestion & Insights
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/trending` | → `TrendingTopic[]`; recomputed by a scheduled job |
-| GET | `/graph/exploration` | `?nodeId=&hops=2&relation=` → nodes/edges (Neo4j) |
-| GET | `/discoveries` | ranked cross-domain link predictions → `{score, srcNode, relation, dstNode, evidencePaths[], papers[]}` |
-| POST | `/discoveries/{id}/feedback` | `{useful: bool}` — retrains ranking |
+| GET | `/trending` | → `TrendingTopic[]`; recomputed on cold start |
+| GET | `/graph/exploration` | `?nodeId=&hops=2&relation=` → nodes/edges (Neo4j or Postgres BFS) |
+| GET | `/graph/projection-status` | Neo4j projector watermark & counts |
+| POST | `/graph/project` | Trigger incremental (`full=false`) or full Neo4j projection |
+| GET | `/discoveries` | Ranked cross-domain link predictions (Platt-calibrated) |
+| POST | `/discoveries/{id}/feedback` | `{useful: bool}` — records vote & recalibrates Platt weights |
+| POST | `/discoveries/retrain` | Retrain PyTorch GNN + refresh calibrated discoveries |
+| POST | `/ingest/arxiv` | Trigger arXiv ingestion + embed + KG build (Arq or BackgroundTasks) |
+| POST | `/ingest/pubmed` | Trigger PubMed E-utilities ingestion |
+| POST | `/ingest/semantic-scholar` | Trigger Semantic Scholar Graph API ingestion |
+| POST | `/ingest/backfill` | Trigger SPECTER2/SciBERT embedding backfill |
+| GET | `/ingest/status` | Corpus, embedding, KG, and discovery counts |
+| GET | `/insights/research-gaps` | 6.B: Cross-domain KG method × target gaps |
+| GET | `/insights/gateway-papers` | 6.D: Reading-order PageRank gateway papers |
+| GET | `/insights/research-debt` | 7.2: Saved papers aging without notes/project/AI summary |
+| GET | `/insights/cross-collection` | 7.3: Bridging papers across user collections |
+| GET | `/insights/affinity` | 7.5: Pairwise collaboration affinity scores |
+| GET | `/insights/velocity` | 7.7: Monthly research productivity metrics |
+| GET | `/collections/{id}/clusters` | 6.E: K-Means + TF-IDF topic clusters for a collection |
+| GET | `/search/explain/{paper_id}` | 7.1: "Why This Paper?" provenance breakdown |
+| POST | `/papers/{id}/citation-polarity` | 6.A: 3-class `supports / disputes / neutral` classifier |
+| POST | `/manuscripts/{id}/citation-gaps` | 7.4: Uncited method detection + candidate papers |
+| POST | `/projects/{id}/ai-thread/stream` | 6: SSE streaming RAG-grounded assistant + persistence |
+| GET/POST/DELETE | `/projects/{id}/reading-room` | 7.6: Sentence-level collaborative paper annotations |
+| GET | `/users/me/velocity` | 7.7: Alias for user research velocity dashboard |
 
 ---
 

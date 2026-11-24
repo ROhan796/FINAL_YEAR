@@ -6,6 +6,7 @@ byte-compatible so wiring the frontend later is a URL change and nothing else.
 
 from __future__ import annotations
 
+import json
 from time import perf_counter
 from typing import Annotated, Any
 
@@ -169,13 +170,55 @@ def legacy_analyze_draft(body: DraftBody) -> dict[str, Any]:
 def legacy_chat(body: ChatBody) -> dict[str, Any]:
     if not body.message or not body.message.strip():
         return {"error": "Message text is required"}
-    reply = chat_assistant(
-        message=body.message,
-        project_context=body.projectContext,
-        paper_context=body.paperContext,
-        conversation_history=body.conversationHistory,
-    )
+    from app.db.session import get_session_factory
+
+    db = get_session_factory()()
+    try:
+        reply = chat_assistant(
+            message=body.message,
+            project_context=body.projectContext,
+            paper_context=body.paperContext,
+            conversation_history=body.conversationHistory,
+            db=db,
+        )
+    finally:
+        db.close()
     return {"reply": reply}
+
+
+@router.post("/chat-assistant/stream")
+def legacy_chat_stream(body: ChatBody):
+    """SSE stream of the assistant reply. Same body as /api/chat-assistant;
+    emits `data: {"delta": "..."}` frames then `data: {"done": true}`."""
+    from fastapi.responses import StreamingResponse
+
+    from app.ai.service import chat_assistant_stream
+    from app.db.session import get_session_factory
+
+    if not body.message or not body.message.strip():
+        return {"error": "Message text is required"}
+
+    db = get_session_factory()()
+
+    def event_stream():
+        try:
+            for piece in chat_assistant_stream(
+                message=body.message,
+                project_context=body.projectContext,
+                paper_context=body.paperContext,
+                conversation_history=body.conversationHistory,
+                db=db,
+            ):
+                yield f'data: {json.dumps({"delta": piece})}\n\n'
+            yield f'data: {json.dumps({"done": True})}\n\n'
+        finally:
+            db.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 __all__ = ["router", "settings"]

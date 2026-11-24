@@ -1,10 +1,12 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Compass, Grid, List, Filter, RotateCcw } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Compass, Grid, List, Route } from 'lucide-react';
 import { usePlatformStore } from '@/lib/platform-store';
 import { PaperCard } from '../PaperCard';
 import { Paper } from '@/lib/mock-data';
+import { insightsApi } from '@/lib/api';
+import type { GatewayPaper } from '@/lib/api/insights';
 
 interface DiscoverViewProps {
   onOpenPaperDetail: (paper: Paper) => void;
@@ -22,6 +24,11 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
   const [sortBy, setSortBy] = useState<'relevance' | 'citations' | 'newest'>('relevance');
   const [selectedTag, setSelectedTag] = useState<string>('All');
   const [openAccessOnly, setOpenAccessOnly] = useState(false);
+  const [gateways, setGateways] = useState<GatewayPaper[]>([]);
+
+  useEffect(() => {
+    insightsApi.gatewayPapers(4).then(setGateways).catch(() => setGateways([]));
+  }, []);
 
   // Extract all unique tags
   const allTags = Array.from(new Set(papers.flatMap((p) => p.tags)));
@@ -53,6 +60,27 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
           Browse indexed publications, filter by scientific discipline, and inspect AI-generated intelligence breakdowns.
         </p>
       </div>
+
+      {/* 6.D Gateway Papers (Reading-Order PageRank) */}
+      {gateways.length > 0 && (
+        <div className="bg-[#faf9f5] border border-[#cccbc8] rounded-2xl p-5 space-y-3">
+          <span className="font-sans text-xs font-bold uppercase tracking-wider text-[#d97757] flex items-center gap-1.5">
+            <Route className="w-3.5 h-3.5" /> Gateway Papers (Reading-Order PageRank)
+          </span>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            {gateways.map((gw) => (
+              <div key={gw.paperId} className="bg-[#f0eee6] border border-[#cccbc8] rounded-xl p-3 space-y-1">
+                <div className="flex items-center justify-between font-sans text-[10px] text-[#87867f]">
+                  <span className="font-bold text-[#d97757]">Gateway #{gw.rank}</span>
+                  <span>PR {(gw.gatewayScore * 100).toFixed(0)}%</span>
+                </div>
+                <div className="font-serif text-sm font-medium text-[#141413] line-clamp-2">{gw.title}</div>
+                <div className="font-sans text-[10px] text-[#87867f]">{gw.venue} • {gw.year}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Control Bar */}
       <div className="bg-[#faf9f5] border border-[#cccbc8] rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4 font-sans text-xs">

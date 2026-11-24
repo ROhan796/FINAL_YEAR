@@ -30,3 +30,5 @@ export type { Manuscript, AIReview } from './manuscripts';
 
 export { graphApi } from './graph';
 export type { GraphNode, GraphEdge, GraphExploration, Discovery } from './graph';
+
+export { insightsApi } from './insights';

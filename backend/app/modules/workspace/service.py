@@ -430,14 +430,17 @@ class WorkspaceService:
             reply = chat_assistant(
                 message=message,
                 project_context={
+                    "id": project.id,
                     "name": project.name,
                     "field": project.field,
                     "description": project.description,
+                    "paperIds": [p.id for p in papers],
                     "paperTitles": [p.title for p in papers],
                 },
                 conversation_history=[
                     {"sender": r.sender, "text": r.content} for r in self.repo.chat(project.id)[-10:]
                 ],
+                db=self.db,
             )
             cached = True
         except Exception:  # noqa: BLE001 - assistant degradation must not 500
@@ -453,9 +456,127 @@ class WorkspaceService:
         self.db.commit()
         return {"reply": reply, "cached": cached}
 
+    def ask_stream(self, project_id: str, user_id: str, message: str):
+        """Yield SSE deltas from RAG-grounded chat_assistant_stream and persist both turns."""
+        from app.ai.service import _collect_rag_chunks, chat_assistant_stream
+
+        project = self.get_project(project_id, user_id)
+        papers = self.repo.papers(project.id)
+        proj_ctx = {
+            "id": project.id,
+            "name": project.name,
+            "field": project.field,
+            "description": project.description,
+            "paperIds": [p.id for p in papers],
+            "paperTitles": [p.title for p in papers],
+        }
+        history = [{"sender": r.sender, "text": r.content} for r in self.repo.chat(project.id)[-10:]]
+        rag_chunks = _collect_rag_chunks(proj_ctx, None, message, db=self.db)
+
+        buffered: list[str] = []
+        yield {"ragSources": [c.get("metadata", {}) for c in rag_chunks[:5]]}
+        for piece in chat_assistant_stream(
+            message=message,
+            project_context=proj_ctx,
+            conversation_history=history,
+            db=self.db,
+        ):
+            buffered.append(piece)
+            yield {"delta": piece}
+
+        full_reply = "".join(buffered).strip()
+        self.repo.add(ProjectChatMessage(project_id=project.id, user_id=user_id, sender="user", content=message))
+        self.repo.add(
+            ProjectChatMessage(project_id=project.id, user_id=user_id, sender="assistant", content=full_reply, cached=False)
+        )
+        self.db.commit()
+        yield {"done": True}
+
     def clear_chat(self, project_id: str, user_id: str) -> None:
         self.get_project(project_id, user_id)
         self.repo.clear_chat(project_id)
+        self.db.commit()
+
+    # ── Reading Room (7.6: sentence-level collaborative paper annotation) ─
+
+    def reading_annotations(
+        self, project_id: str, user_id: str, paper_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        from sqlalchemy import select
+
+        from app.models.project import ReadingAnnotation
+
+        self.get_project(project_id, user_id)
+        stmt = select(ReadingAnnotation).where(ReadingAnnotation.project_id == project_id)
+        if paper_id:
+            stmt = stmt.where(ReadingAnnotation.paper_id == paper_id)
+        rows = self.db.scalars(stmt.order_by(ReadingAnnotation.sentence_index, ReadingAnnotation.created_at)).all()
+        return [
+            {
+                "id": r.id,
+                "projectId": r.project_id,
+                "paperId": r.paper_id,
+                "chunkId": r.chunk_id,
+                "sentenceIndex": r.sentence_index,
+                "highlightText": r.highlight_text,
+                "comment": r.comment,
+                "authorName": r.author_name,
+                "authorAvatar": r.author_avatar,
+                "timestamp": _humanize(r.created_at),
+            }
+            for r in rows
+        ]
+
+    def add_reading_annotation(
+        self,
+        project_id: str,
+        user_id: str,
+        *,
+        paper_id: str,
+        sentence_index: int,
+        highlight_text: str,
+        comment: str,
+        chunk_id: str | None = None,
+    ) -> dict[str, Any]:
+        from app.models.project import ReadingAnnotation
+
+        project = self._require(project_id, user_id, "Editor")
+        member = next((m for m in project.members if m.user_id == user_id), None)
+        ann = ReadingAnnotation(
+            project_id=project_id,
+            paper_id=paper_id,
+            chunk_id=chunk_id,
+            sentence_index=sentence_index,
+            highlight_text=highlight_text[:1000],
+            comment=comment.strip(),
+            author_id=user_id,
+            author_name=member.name if member else project.owner_name,
+            author_avatar=member.avatar if member else AVATAR_PLACEHOLDER,
+        )
+        self.db.add(ann)
+        self.db.commit()
+        self.db.refresh(ann)
+        return {
+            "id": ann.id,
+            "projectId": ann.project_id,
+            "paperId": ann.paper_id,
+            "chunkId": ann.chunk_id,
+            "sentenceIndex": ann.sentence_index,
+            "highlightText": ann.highlight_text,
+            "comment": ann.comment,
+            "authorName": ann.author_name,
+            "authorAvatar": ann.author_avatar,
+            "timestamp": _humanize(ann.created_at),
+        }
+
+    def delete_reading_annotation(self, project_id: str, user_id: str, ann_id: str) -> None:
+        from app.models.project import ReadingAnnotation
+
+        self._require(project_id, user_id, "Editor")
+        ann = self.db.get(ReadingAnnotation, ann_id)
+        if ann is None or ann.project_id != project_id:
+            raise NotFoundError("Annotation not found")
+        self.db.delete(ann)
         self.db.commit()
 
     # ── serialisation ───────────────────────────────────────────────────

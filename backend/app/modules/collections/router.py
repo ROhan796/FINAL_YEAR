@@ -73,6 +73,14 @@ def ai_overview(collection_id: str, db: DbSession, user: CurrentUserDep) -> Any:
     return CollectionService(db).ai_overview(collection_id, user["id"])
 
 
+@router.get("/{collection_id}/clusters")
+def collection_clusters(collection_id: str, db: ReadDbSession, user: CurrentUserDep) -> dict[str, Any]:
+    """6.E: Contrastive collection clustering (K-Means + TF-IDF topic naming)."""
+    from app.modules.insights.service import InsightsService
+
+    return InsightsService(db).collection_clusters(collection_id, user["id"])
+
+
 @router.get("/{collection_id}/export")
 def export(
     collection_id: str,

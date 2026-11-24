@@ -317,26 +317,14 @@ _SYSTEM = (
 )
 
 
-def chat_assistant(
-    *,
+def _build_chat_prompt(
     message: str,
-    project_context: dict[str, Any] | None = None,
-    paper_context: dict[str, Any] | None = None,
-    conversation_history: list[dict[str, str]] | None = None,
-    alias: str | None = None,
-) -> str:
-    key = alias or cache_key(
-        "chat",
-        _hash(
-            json.dumps(project_context or {}, sort_keys=True, default=str),
-            json.dumps(paper_context or {}, sort_keys=True, default=str),
-            message,
-        ),
-    )
-    hit = _cached(key)
-    if hit:
-        return str(hit)
-
+    project_context: dict[str, Any] | None,
+    paper_context: dict[str, Any] | None,
+    conversation_history: list[dict[str, str]] | None,
+    rag_chunks: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    """Return (system, user_prompt) for the chat call — shared by sync + stream."""
     system = _SYSTEM
     if project_context:
         papers = project_context.get("paperTitles") or []
@@ -353,6 +341,14 @@ def chat_assistant(
             f"Abstract: {paper_context.get('abstract', '')}"
         )
 
+    if rag_chunks:
+        system += (
+            "\n\nRetrieved passages from the project's papers (use these; cite paper ids):"
+        )
+        for i, chunk in enumerate(rag_chunks[:8], 1):
+            meta = chunk.get("metadata") or {}
+            system += f"\n[{i}] (paper {meta.get('paper_id', '?')}, {meta.get('section', 'passage')}): {chunk.get('text', '')[:900]}"
+
     history = conversation_history or []
     prefix = ""
     if history:
@@ -361,14 +357,109 @@ def chat_assistant(
         ) + "\n\n"
 
     prompt = f"{prefix}Researcher User Question: {message}"
+    return system, prompt
 
-    # Bounded context: retrieval/turn history is capped so cost and latency stay predictable.
+
+def _collect_rag_chunks(
+    project_context: dict[str, Any] | None,
+    paper_context: dict[str, Any] | None,
+    message: str,
+    db: Any = None,
+) -> list[dict[str, Any]]:
+    """Resolve the RAG set: project paperIds → paper_chunks, ranked by the query."""
+    paper_ids: list[str] = list(project_context.get("paperIds") or []) if project_context else []
+    if not paper_ids and paper_context and paper_context.get("id"):
+        paper_ids = [str(paper_context["id"])]
+    if not paper_ids:
+        return []
+    owns_session = db is None
+    if owns_session:
+        try:
+            from app.db.session import get_session_factory
+
+            db = get_session_factory()()
+        except Exception:  # noqa: BLE001
+            return []
+    try:
+        from ml.serving.rag import retrieve_for_project
+
+        return retrieve_for_project(db, paper_ids, message, top_k=8, max_tokens=4000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("chat_rag_failed", error=str(exc))
+        return []
+    finally:
+        if owns_session and db is not None:
+            db.close()
+
+
+def chat_assistant(
+    *,
+    message: str,
+    project_context: dict[str, Any] | None = None,
+    paper_context: dict[str, Any] | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
+    alias: str | None = None,
+    db: Any = None,
+) -> str:
+    key = alias or cache_key(
+        "chat",
+        _hash(
+            json.dumps(project_context or {}, sort_keys=True, default=str),
+            json.dumps(paper_context or {}, sort_keys=True, default=str),
+            message,
+        ),
+    )
+    hit = _cached(key)
+    if hit:
+        return str(hit)
+
+    rag_chunks = _collect_rag_chunks(project_context, paper_context, message, db=db)
+    system, prompt = _build_chat_prompt(
+        message, project_context, paper_context, conversation_history, rag_chunks
+    )
+
     reply = _ask(prompt, system=system)
     if not reply:
         reply = _fallback_reply(message)
 
     set_json(key, reply, 600)  # chat answers are cheap to reuse for 10 minutes
     return reply
+
+
+def chat_assistant_stream(
+    *,
+    message: str,
+    project_context: dict[str, Any] | None = None,
+    paper_context: dict[str, Any] | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
+    db: Any = None,
+):
+    """Yield reply chunks (SSE). Same prompt construction as the sync path;
+    skips the cache on the way out but stores the assembled answer on completion."""
+    rag_chunks = _collect_rag_chunks(project_context, paper_context, message, db=db)
+    system, prompt = _build_chat_prompt(
+        message, project_context, paper_context, conversation_history, rag_chunks
+    )
+
+    from app.ai.providers import get_llm
+
+    buffered: list[str] = []
+    try:
+        for piece in get_llm().stream(prompt, system=system):
+            buffered.append(piece)
+            yield piece
+    except Exception as exc:  # noqa: BLE001
+        log.warning("chat_stream_failed", error=str(exc))
+
+    if not buffered:
+        fallback = _fallback_reply(message)
+        yield fallback
+        buffered.append(fallback)
+
+    try:
+        set_json(cache_key("chat", _hash(json.dumps(project_context or {}, sort_keys=True, default=str), message)), "".join(buffered), 600)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _fallback_reply(message: str) -> str:
@@ -439,6 +530,7 @@ def search_reasoning(query: str, candidates: list[dict[str, Any]]) -> dict[str, 
 __all__ = [
     "analyze_draft",
     "chat_assistant",
+    "chat_assistant_stream",
     "generate_insights",
     "search_reasoning",
     "summarize_paper",

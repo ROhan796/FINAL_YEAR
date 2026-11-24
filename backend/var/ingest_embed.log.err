@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\INTERNSHIP_TASK\TASK30\final-year-\backend\scripts\ingest_corpus.py", line 82, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "C:\INTERNSHIP_TASK\TASK30\final-year-\backend\scripts\ingest_corpus.py", line 60, in main
+    stats = backfill_all(db)
+  File "C:\INTERNSHIP_TASK\TASK30\final-year-\backend\ml\serving\backfill.py", line 139, in backfill_all
+    related = rebuild_related_papers(db)
+  File "C:\INTERNSHIP_TASK\TASK30\final-year-\backend\ml\serving\backfill.py", line 110, in rebuild_related_papers
+    mat = np.array([np.asarray(p.embedding, dtype=np.float32) for p in papers])
+ValueError: setting an array element with a sequence. The requested array has an inhomogeneous shape after 1 dimensions. The detected shape was (125,) + inhomogeneous part.

@@ -545,7 +545,7 @@ Each module: `router.py` (HTTP only) → `service.py` (business rules, transacti
 
 | Phase | Scope |
 |---|---|
-| **P0 — this pass** | Architecture docs, API contract, full modular backend scaffold, pgvector schema + migrations, all routes/services/repos, 5 AI contracts preserved, modular ML package |
-| **P1** | Frontend wiring (`platform-store` → API), auth UI, seed script, docker-compose, E2E tests |
-| **P2** | Real corpus ingestion, embedding backfill, NER/RE fine-tune on SciERC, GNN training run, discovery dashboard |
-| **P3** | Neo4j projection hardening, streaming chat, horizontal scaling, partitioning, observability stack |
+| **P0** | Architecture docs, API contract, modular backend scaffold, pgvector schema, 5 AI contracts, ML package |
+| **P1** | Frontend wiring (`platform-store` → API + connection state), JWT auth UI (`/login`, `/register`, `middleware.ts`), Landing `/` + `/feed`, Arq worker + CLI + OpenTelemetry |
+| **P2** | Real arXiv/PubMed/S2 ingestion, SPECTER2+Matryoshka backfill, trained NER/RE/Citation-Polarity checkpoints, PyTorch GNN training, Platt-calibrated discoveries, Graph UI |
+| **P3** | Neo4j incremental projector, RAG SSE streaming chat, Reading Room annotations, 7 novel algorithms + 7 out-of-the-box features, pytest + CI |

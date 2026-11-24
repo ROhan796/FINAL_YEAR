@@ -81,48 +81,39 @@ Users can enter the application through the existing authentication CTAs.
 
 # 2. Authentication
 
-Authentication is handled through **Clerk**.
+Authentication is handled through **built-in JWT (HS256) + Next.js Route Middleware** (`middleware.ts`, `/login`, `/register`, and `/api/v1/auth/*`).
 
-The intended authentication flow is:
+The authentication flow is:
 
 ```text
-Landing Page
+Landing Page (/)
      │
-     ├── Get Started
-     │       ↓
-     │    Sign Up
-     │
-     └── Sign In
-             ↓
-          Sign In
-             │
-             ↓
-       Authentication
-             │
-             ↓
-        Research Feed
+     ├── Get Started ──► /register ──► JWT Tokens + Cookie ──► /feed
+     ├── Sign In     ──► /login    ──► JWT Tokens + Cookie ──► /feed
+     └── Launch      ──► /feed (dev auto-login when enabled)
 ```
 
-Authenticated users are directed into the main research platform.
-
-Authentication should not alter the existing application's visual identity.
-
-The existing landing page, header, navigation, research feed, search experience, paper discovery, and collections UI are designed independently of Clerk's default visual components.
+In development, `DEV_AUTO_LOGIN=true` lets evaluators launch `/feed` directly as the seeded researcher (`Dr. Amara Nwosu`), while `/login` and `/register` support full email/password accounts and explicit sign-out.
 
 ### Environment variables
 
-Create a local `.env.local` file.
-
-Never commit this file.
-
-Required authentication variables:
+Copy `.env.example` to `.env.local` (frontend) and `backend/.env.example` to `backend/.env` (backend):
 
 ```env
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=your_clerk_publishable_key
-CLERK_SECRET_KEY=your_clerk_secret_key
+NEXT_PUBLIC_API_URL="http://localhost:8000"
+BACKEND_URL="http://127.0.0.1:8000"
+GEMINI_API_KEY="your_gemini_api_key"
 ```
 
-The secret key must remain server-side and must never be exposed in client-side code.
+Never hardcode API keys into the source code.
+
+### Additional Documentation
+
+- [Implementation Index & Status](docs/implemented.md)
+- [ML Pipeline & Novel Algorithms](docs/ml-pipeline.md)
+- [Frontend Architecture](docs/frontend-architecture.md)
+- [Backend System Architecture](backend/docs/01-system-architecture.md)
+- [Backend API Contract](backend/docs/02-api-contract.md)
 
 ---
 
@@ -1565,3 +1556,5 @@ https://github.com/yourname442005/final-year-
 **Application:** suiiiiii
 
 **Category:** AI-Native Research Intelligence Platform
+#   F I N A L _ Y E A R  
+ 

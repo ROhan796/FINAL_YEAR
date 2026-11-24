@@ -18,7 +18,19 @@ import {
   INITIAL_TRENDING_TOPICS,
   INITIAL_MANUSCRIPTS
 } from './mock-data';
-import { authApi, papersApi, feedApi, collectionsApi, researchersApi, projectsApi, manuscriptsApi, notificationsApi, searchApi } from './api';
+import {
+  api,
+  authApi,
+  papersApi,
+  feedApi,
+  collectionsApi,
+  researchersApi,
+  projectsApi,
+  manuscriptsApi,
+  notificationsApi,
+  searchApi,
+  getAccessToken,
+} from './api';
 
 export interface UserProfile {
   id: string;
@@ -32,6 +44,8 @@ export interface UserProfile {
   interests: string[];
   email: string;
 }
+
+export type BackendStatus = 'connecting' | 'live' | 'demo';
 
 const DEFAULT_USER: UserProfile = {
   id: 'current-user',
@@ -60,48 +74,13 @@ interface PlatformState {
   trendingTopics: TrendingTopic[];
   manuscripts: ManuscriptSubmission[];
   searchHistory: string[];
+  backendStatus: BackendStatus;
+  syncError: string | null;
+  writeError: string | null;
 }
 
 function getInitialState(): PlatformState {
-  if (typeof window === 'undefined') {
-    return {
-      user: DEFAULT_USER,
-      savedPaperIds: ['paper-101', 'paper-104'],
-      papers: INITIAL_PAPERS,
-      researchers: INITIAL_RESEARCHERS,
-      feedPosts: INITIAL_FEED_POSTS,
-      collections: INITIAL_COLLECTIONS,
-      projects: INITIAL_PROJECTS,
-      notifications: INITIAL_NOTIFICATIONS,
-      trendingTopics: INITIAL_TRENDING_TOPICS,
-      manuscripts: INITIAL_MANUSCRIPTS,
-      searchHistory: ['multimodal reasoning', 'quantum surface spectroscopy', 'homomorphic encryption genomics']
-    };
-  }
-
-  try {
-    const item = window.localStorage.getItem(STORAGE_KEY);
-    if (item) {
-      const parsed = JSON.parse(item);
-      return {
-        user: parsed.user || DEFAULT_USER,
-        savedPaperIds: parsed.savedPaperIds || ['paper-101', 'paper-104'],
-        papers: parsed.papers || INITIAL_PAPERS,
-        researchers: parsed.researchers || INITIAL_RESEARCHERS,
-        feedPosts: parsed.feedPosts || INITIAL_FEED_POSTS,
-        collections: parsed.collections || INITIAL_COLLECTIONS,
-        projects: parsed.projects || INITIAL_PROJECTS,
-        notifications: parsed.notifications || INITIAL_NOTIFICATIONS,
-        trendingTopics: parsed.trendingTopics || INITIAL_TRENDING_TOPICS,
-        manuscripts: parsed.manuscripts || INITIAL_MANUSCRIPTS,
-        searchHistory: parsed.searchHistory || ['multimodal reasoning', 'quantum surface spectroscopy']
-      };
-    }
-  } catch (e) {
-    console.error('Error loading state from localStorage:', e);
-  }
-
-  return {
+  const base: PlatformState = {
     user: DEFAULT_USER,
     savedPaperIds: ['paper-101', 'paper-104'],
     papers: INITIAL_PAPERS,
@@ -112,8 +91,40 @@ function getInitialState(): PlatformState {
     notifications: INITIAL_NOTIFICATIONS,
     trendingTopics: INITIAL_TRENDING_TOPICS,
     manuscripts: INITIAL_MANUSCRIPTS,
-    searchHistory: ['multimodal reasoning', 'quantum surface spectroscopy']
+    searchHistory: ['multimodal reasoning', 'quantum surface spectroscopy', 'homomorphic encryption genomics'],
+    backendStatus: 'connecting',
+    syncError: null,
+    writeError: null,
   };
+
+  if (typeof window === 'undefined') {
+    return base;
+  }
+
+  try {
+    const item = window.localStorage.getItem(STORAGE_KEY);
+    if (item) {
+      const parsed = JSON.parse(item);
+      return {
+        ...base,
+        user: parsed.user || DEFAULT_USER,
+        savedPaperIds: parsed.savedPaperIds || base.savedPaperIds,
+        papers: parsed.papers || INITIAL_PAPERS,
+        researchers: parsed.researchers || INITIAL_RESEARCHERS,
+        feedPosts: parsed.feedPosts || INITIAL_FEED_POSTS,
+        collections: parsed.collections || INITIAL_COLLECTIONS,
+        projects: parsed.projects || INITIAL_PROJECTS,
+        notifications: parsed.notifications || INITIAL_NOTIFICATIONS,
+        trendingTopics: parsed.trendingTopics || INITIAL_TRENDING_TOPICS,
+        manuscripts: parsed.manuscripts || INITIAL_MANUSCRIPTS,
+        searchHistory: parsed.searchHistory || base.searchHistory,
+      };
+    }
+  } catch (e) {
+    console.error('Error loading state from localStorage:', e);
+  }
+
+  return base;
 }
 
 let globalState: PlatformState | null = null;
@@ -136,7 +147,9 @@ function setStoreState(updater: (prev: PlatformState) => PlatformState) {
   globalState = nextState;
   if (typeof window !== 'undefined') {
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+      // Persist domain entities only (keep transient status fresh across reloads)
+      const { backendStatus: _b, syncError: _s, writeError: _w, ...persistable } = nextState;
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
     } catch (e) {
       console.error('Error saving state to localStorage:', e);
     }
@@ -144,97 +157,109 @@ function setStoreState(updater: (prev: PlatformState) => PlatformState) {
   listeners.forEach((listener) => listener(nextState));
 }
 
-/** Partial state update — merges into current state without replacing everything. */
 function patchStore(patch: Partial<PlatformState>) {
   setStoreState((prev) => ({ ...prev, ...patch }));
 }
 
-// ── Backend sync (runs once on mount) ──────────────────────────────────
+function reportWriteError(action: string, err: unknown) {
+  const msg = err instanceof Error ? err.message : 'Backend request failed';
+  patchStore({ writeError: `${action}: ${msg}` });
+}
 
-async function syncFromBackend() {
-  if (backendSynced || typeof window === 'undefined') return;
+// ── Backend sync ──────────────────────────────────────────────────────
+
+async function syncFromBackend(force: boolean = false) {
+  if (typeof window === 'undefined') return;
+  if (backendSynced && !force) return;
   backendSynced = true;
+  patchStore({ backendStatus: 'connecting', syncError: null });
 
   try {
-    // 1. Auth: dev-login to get tokens + user
-    const tokens = await authApi.devLogin();
-    const user: UserProfile = tokens.user;
-    patchStore({ user });
+    const loggedOut = document.cookie.includes('ckgai_logged_out=1');
+    let user: UserProfile | null = null;
 
-    // 2. Papers
-    try {
-      const paperRes = await papersApi.list();
-      if (paperRes.items?.length) {
-        patchStore({ papers: paperRes.items as unknown as Paper[] });
+    if (getAccessToken()) {
+      try {
+        user = await authApi.getMe();
+      } catch {
+        user = null;
       }
-    } catch { /* keep mock */ }
+    }
 
-    // 3. Saved papers
-    try {
-      const savedRes = await papersApi.getSaved();
-      if (savedRes.items) {
-        patchStore({ savedPaperIds: savedRes.items.map((p: Paper) => p.id) });
-      }
-    } catch { /* keep mock */ }
+    if (!user && !loggedOut) {
+      const tokens = await authApi.devLogin();
+      user = tokens.user;
+    }
 
-    // 4. Feed
-    try {
-      const feedRes = await feedApi.getFeed();
-      if (feedRes.items?.length) {
-        patchStore({ feedPosts: feedRes.items as unknown as FeedPost[] });
-      }
-    } catch { /* keep mock */ }
+    if (user) {
+      patchStore({ user });
+    }
 
-    // 5. Collections
-    try {
-      const colRes = await collectionsApi.list();
-      if (colRes.items?.length) {
-        patchStore({ collections: colRes.items as unknown as Collection[] });
-      }
-    } catch { /* keep mock */ }
+    const results = await Promise.allSettled([
+      papersApi.list({ sort: 'citations' }),
+      papersApi.getSaved(),
+      feedApi.getFeed(),
+      collectionsApi.list(),
+      researchersApi.list(),
+      projectsApi.list(),
+      manuscriptsApi.list(),
+      notificationsApi.list(),
+      searchApi.getHistory(),
+      api.get<{ items: TrendingTopic[] }>('/api/v1/trending'),
+    ]);
 
-    // 6. Researchers
-    try {
-      const resRes = await researchersApi.list();
-      if (resRes.items?.length) {
-        patchStore({ researchers: resRes.items as unknown as Researcher[] });
-      }
-    } catch { /* keep mock */ }
+    const [
+      paperRes,
+      savedRes,
+      feedRes,
+      colRes,
+      resRes,
+      projRes,
+      msRes,
+      notifRes,
+      histRes,
+      trendRes,
+    ] = results;
 
-    // 7. Projects
-    try {
-      const projRes = await projectsApi.list();
-      if (projRes.items?.length) {
-        patchStore({ projects: projRes.items as unknown as WorkspaceProject[] });
-      }
-    } catch { /* keep mock */ }
+    const patch: Partial<PlatformState> = { backendStatus: 'live', syncError: null };
 
-    // 8. Manuscripts
-    try {
-      const msRes = await manuscriptsApi.list();
-      if (msRes.items?.length) {
-        patchStore({ manuscripts: msRes.items as unknown as ManuscriptSubmission[] });
-      }
-    } catch { /* keep mock */ }
+    if (paperRes.status === 'fulfilled' && paperRes.value.items?.length) {
+      patch.papers = paperRes.value.items as unknown as Paper[];
+    }
+    if (savedRes.status === 'fulfilled' && savedRes.value.items) {
+      patch.savedPaperIds = savedRes.value.items.map((p: Paper) => p.id);
+    }
+    if (feedRes.status === 'fulfilled' && feedRes.value.items?.length) {
+      patch.feedPosts = feedRes.value.items as unknown as FeedPost[];
+    }
+    if (colRes.status === 'fulfilled' && colRes.value.items?.length) {
+      patch.collections = colRes.value.items as unknown as Collection[];
+    }
+    if (resRes.status === 'fulfilled' && resRes.value.items?.length) {
+      patch.researchers = resRes.value.items as unknown as Researcher[];
+    }
+    if (projRes.status === 'fulfilled' && projRes.value.items?.length) {
+      patch.projects = projRes.value.items as unknown as WorkspaceProject[];
+    }
+    if (msRes.status === 'fulfilled' && Array.isArray(msRes.value)) {
+      patch.manuscripts = msRes.value as unknown as ManuscriptSubmission[];
+    } else if (msRes.status === 'fulfilled' && (msRes.value as { items?: ManuscriptSubmission[] }).items) {
+      patch.manuscripts = (msRes.value as { items: ManuscriptSubmission[] }).items;
+    }
+    if (notifRes.status === 'fulfilled' && notifRes.value.items) {
+      patch.notifications = notifRes.value.items as unknown as NotificationItem[];
+    }
+    if (histRes.status === 'fulfilled' && histRes.value?.length) {
+      patch.searchHistory = histRes.value;
+    }
+    if (trendRes.status === 'fulfilled' && trendRes.value.items?.length) {
+      patch.trendingTopics = trendRes.value.items;
+    }
 
-    // 9. Notifications
-    try {
-      const notifRes = await notificationsApi.list();
-      if (notifRes.items?.length) {
-        patchStore({ notifications: notifRes.items as unknown as NotificationItem[] });
-      }
-    } catch { /* keep mock */ }
-
-    // 10. Search history
-    try {
-      const histRes = await searchApi.getHistory();
-      if (histRes?.length) {
-        patchStore({ searchHistory: histRes });
-      }
-    } catch { /* keep mock */ }
-
+    patchStore(patch);
   } catch (err) {
-    console.warn('Backend sync failed, using local data:', err);
+    const msg = err instanceof Error ? err.message : 'Backend API unreachable';
+    patchStore({ backendStatus: 'demo', syncError: msg });
   }
 }
 
@@ -246,49 +271,61 @@ export function usePlatformStore() {
       setState(newState);
     };
     listeners.add(listener);
-
-    // Trigger backend sync on first mount
-    syncFromBackend();
-
+    syncFromBackend(false);
     return () => {
       listeners.delete(listener);
     };
   }, []);
 
+  const retrySync = useCallback(async () => {
+    await syncFromBackend(true);
+  }, []);
+
+  const clearWriteError = useCallback(() => {
+    patchStore({ writeError: null });
+  }, []);
+
+  const logout = useCallback(() => {
+    authApi.logout();
+    backendSynced = false;
+    patchStore({ backendStatus: 'demo' });
+  }, []);
+
   const toggleSavePaper = useCallback((paperId: string) => {
-    // Optimistic local update
-    setStoreState((prev) => {
-      const isSaved = prev.savedPaperIds.includes(paperId);
-      const updatedSaved = isSaved
+    const wasSaved = getStoreState().savedPaperIds.includes(paperId);
+    setStoreState((prev) => ({
+      ...prev,
+      savedPaperIds: wasSaved
         ? prev.savedPaperIds.filter((id) => id !== paperId)
-        : [...prev.savedPaperIds, paperId];
-      return { ...prev, savedPaperIds: updatedSaved };
-    });
-    // Backend call (fire and forget)
-    papersApi.save(paperId).catch(() => papersApi.unsave(paperId).catch(() => {}));
+        : [...prev.savedPaperIds, paperId]
+    }));
+    const req = wasSaved ? papersApi.unsave(paperId) : papersApi.save(paperId);
+    req.catch((err) => reportWriteError('Save paper sync failed', err));
   }, []);
 
   const toggleFollowResearcher = useCallback((researcherId: string) => {
-    setStoreState((prev) => {
-      const updated = prev.researchers.map((r) => {
-        if (r.id === researcherId) {
-          const isFollowed = !r.isFollowed;
-          return {
-            ...r,
-            isFollowed,
-            followersCount: isFollowed ? r.followersCount + 1 : Math.max(0, r.followersCount - 1)
-          };
-        }
-        return r;
-      });
-      return { ...prev, researchers: updated };
-    });
-    researchersApi.follow(researcherId).catch(() => researchersApi.unfollow(researcherId).catch(() => {}));
+    const target = getStoreState().researchers.find((r) => r.id === researcherId);
+    const willFollow = !(target?.isFollowed);
+    setStoreState((prev) => ({
+      ...prev,
+      researchers: prev.researchers.map((r) =>
+        r.id === researcherId
+          ? {
+              ...r,
+              isFollowed: willFollow,
+              followersCount: willFollow ? r.followersCount + 1 : Math.max(0, r.followersCount - 1)
+            }
+          : r
+      )
+    }));
+    const req = willFollow ? researchersApi.follow(researcherId) : researchersApi.unfollow(researcherId);
+    req.catch((err) => reportWriteError('Follow update failed', err));
   }, []);
 
   const toggleLikePost = useCallback((postId: string) => {
-    setStoreState((prev) => {
-      const updatedPosts = prev.feedPosts.map((post) => {
+    setStoreState((prev) => ({
+      ...prev,
+      feedPosts: prev.feedPosts.map((post) => {
         if (post.id === postId) {
           const isLiked = !post.isLiked;
           return {
@@ -298,10 +335,9 @@ export function usePlatformStore() {
           };
         }
         return post;
-      });
-      return { ...prev, feedPosts: updatedPosts };
-    });
-    feedApi.toggleLike(postId).catch(() => {});
+      })
+    }));
+    feedApi.toggleLike(postId).catch((err) => reportWriteError('Like sync failed', err));
   }, []);
 
   const addCommentToPost = useCallback((postId: string, commentText: string) => {
@@ -317,15 +353,14 @@ export function usePlatformStore() {
         timestamp: 'Just now',
         verified: currentUser.verified
       };
-      const updatedPosts = prev.feedPosts.map((post) => {
-        if (post.id === postId) {
-          return { ...post, comments: [...post.comments, newComment] };
-        }
-        return post;
-      });
-      return { ...prev, feedPosts: updatedPosts };
+      return {
+        ...prev,
+        feedPosts: prev.feedPosts.map((post) =>
+          post.id === postId ? { ...post, comments: [...post.comments, newComment] } : post
+        )
+      };
     });
-    feedApi.addComment(postId, commentText).catch(() => {});
+    feedApi.addComment(postId, commentText).catch((err) => reportWriteError('Comment sync failed', err));
   }, []);
 
   const createPost = useCallback((content: string, postType: FeedPost['postType'], linkedPaper?: Paper) => {
@@ -335,8 +370,8 @@ export function usePlatformStore() {
         ...prev,
         feedPosts: [newPost as unknown as FeedPost, ...prev.feedPosts]
       }));
-    }).catch(() => {
-      // Fallback: local-only post
+    }).catch((err) => {
+      reportWriteError('Post saved locally (backend offline)', err);
       const currentUser = getStoreState().user;
       setStoreState((prev) => {
         const newPost: FeedPost = {
@@ -367,7 +402,8 @@ export function usePlatformStore() {
         ...prev,
         collections: [newCol as unknown as Collection, ...prev.collections]
       }));
-    }).catch(() => {
+    }).catch((err) => {
+      reportWriteError('Collection created locally (backend sync failed)', err);
       setStoreState((prev) => {
         const newCol: Collection = {
           id: 'col-' + Date.now(),
@@ -387,40 +423,50 @@ export function usePlatformStore() {
   const togglePinCollection = useCallback((collectionId: string) => {
     setStoreState((prev) => {
       const col = prev.collections.find((c) => c.id === collectionId);
-      if (col) collectionsApi.update(collectionId, { pinned: !col.pinned }).catch(() => {});
-      const updated = prev.collections.map((c) => (c.id === collectionId ? { ...c, pinned: !c.pinned } : c));
-      return { ...prev, collections: updated };
+      if (col) {
+        collectionsApi.update(collectionId, { pinned: !col.pinned }).catch((err) =>
+          reportWriteError('Pin update failed', err)
+        );
+      }
+      return {
+        ...prev,
+        collections: prev.collections.map((c) => (c.id === collectionId ? { ...c, pinned: !c.pinned } : c))
+      };
     });
   }, []);
 
   const addPaperToCollection = useCallback((collectionId: string, paperId: string) => {
-    setStoreState((prev) => {
-      const updated = prev.collections.map((c) => {
+    setStoreState((prev) => ({
+      ...prev,
+      collections: prev.collections.map((c) => {
         if (c.id === collectionId && !c.paperIds.includes(paperId)) {
-          collectionsApi.addPaper(collectionId, paperId).catch(() => {});
+          collectionsApi.addPaper(collectionId, paperId).catch((err) =>
+            reportWriteError('Add paper to collection failed', err)
+          );
           return { ...c, paperIds: [...c.paperIds, paperId] };
         }
         return c;
-      });
-      return { ...prev, collections: updated };
-    });
+      })
+    }));
   }, []);
 
   const removePaperFromCollection = useCallback((collectionId: string, paperId: string) => {
-    setStoreState((prev) => {
-      const updated = prev.collections.map((c) => {
+    setStoreState((prev) => ({
+      ...prev,
+      collections: prev.collections.map((c) => {
         if (c.id === collectionId) {
-          collectionsApi.removePaper(collectionId, paperId).catch(() => {});
+          collectionsApi.removePaper(collectionId, paperId).catch((err) =>
+            reportWriteError('Remove paper failed', err)
+          );
           return { ...c, paperIds: c.paperIds.filter((id) => id !== paperId) };
         }
         return c;
-      });
-      return { ...prev, collections: updated };
-    });
+      })
+    }));
   }, []);
 
   const deleteCollection = useCallback((collectionId: string) => {
-    collectionsApi.delete(collectionId).catch(() => {});
+    collectionsApi.delete(collectionId).catch((err) => reportWriteError('Delete collection failed', err));
     setStoreState((prev) => ({
       ...prev,
       collections: prev.collections.filter((c) => c.id !== collectionId)
@@ -433,7 +479,8 @@ export function usePlatformStore() {
         ...prev,
         projects: [newProj as unknown as WorkspaceProject, ...prev.projects]
       }));
-    }).catch(() => {
+    }).catch((err) => {
+      reportWriteError('Project created locally', err);
       const currentUser = getStoreState().user;
       setStoreState((prev) => {
         const newProj: WorkspaceProject = {
@@ -460,14 +507,14 @@ export function usePlatformStore() {
 
   const addTaskToProject = useCallback((projectId: string, title: string, dueDate: string, assigneeName: string) => {
     projectsApi.addTask(projectId, { title, dueDate, assigneeName }).then((newTask) => {
-      setStoreState((prev) => {
-        const updatedProjects = prev.projects.map((p) => {
-          if (p.id === projectId) return { ...p, tasks: [...p.tasks, newTask as unknown as Task] };
-          return p;
-        });
-        return { ...prev, projects: updatedProjects };
-      });
-    }).catch(() => {
+      setStoreState((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) =>
+          p.id === projectId ? { ...p, tasks: [...p.tasks, newTask as unknown as Task] } : p
+        )
+      }));
+    }).catch((err) => {
+      reportWriteError('Task sync failed', err);
       const currentUser = getStoreState().user;
       setStoreState((prev) => {
         const newTask = {
@@ -478,42 +525,48 @@ export function usePlatformStore() {
           assigneeAvatar: currentUser.avatar,
           status: 'Todo' as const
         };
-        const updatedProjects = prev.projects.map((p) => {
-          if (p.id === projectId) return { ...p, tasks: [...p.tasks, newTask] };
-          return p;
-        });
-        return { ...prev, projects: updatedProjects };
+        return {
+          ...prev,
+          projects: prev.projects.map((p) =>
+            p.id === projectId ? { ...p, tasks: [...p.tasks, newTask] } : p
+          )
+        };
       });
     });
   }, []);
 
   const updateTaskStatus = useCallback((projectId: string, taskId: string, newStatus: Task['status']) => {
-    setStoreState((prev) => {
-      const updatedProjects = prev.projects.map((p) => {
+    setStoreState((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) => {
         if (p.id === projectId) {
-          projectsApi.updateTask(projectId, taskId, { status: newStatus }).catch(() => {});
-          const updatedTasks = p.tasks.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t));
-          return { ...p, tasks: updatedTasks };
+          projectsApi.updateTask(projectId, taskId, { status: newStatus }).catch((err) =>
+            reportWriteError('Task status update failed', err)
+          );
+          return {
+            ...p,
+            tasks: p.tasks.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t))
+          };
         }
         return p;
-      });
-      return { ...prev, projects: updatedProjects };
-    });
+      })
+    }));
   }, []);
 
   const addNoteToProject = useCallback((projectId: string, title: string, content: string, paperId?: string) => {
     projectsApi.addNote(projectId, { title, content, paperId }).then((newNote) => {
-      setStoreState((prev) => {
-        const updatedProjects = prev.projects.map((p) => {
-          if (p.id === projectId) return { ...p, notes: [newNote as unknown as import('./mock-data').ProjectNote, ...p.notes] };
-          return p;
-        });
-        return { ...prev, projects: updatedProjects };
-      });
-    }).catch(() => {
+      setStoreState((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) =>
+          p.id === projectId
+            ? { ...p, notes: [newNote as unknown as import('./mock-data').ProjectNote, ...p.notes] }
+            : p
+        )
+      }));
+    }).catch((err) => {
+      reportWriteError('Note sync failed', err);
       const currentUser = getStoreState().user;
-      const papers = getStoreState().papers;
-      const paper = papers.find((p) => p.id === paperId);
+      const paper = getStoreState().papers.find((p) => p.id === paperId);
       setStoreState((prev) => {
         const newNote = {
           id: 'note-' + Date.now(),
@@ -524,11 +577,12 @@ export function usePlatformStore() {
           updatedAt: new Date().toISOString().split('T')[0],
           authorName: currentUser.name
         };
-        const updatedProjects = prev.projects.map((p) => {
-          if (p.id === projectId) return { ...p, notes: [newNote, ...p.notes] };
-          return p;
-        });
-        return { ...prev, projects: updatedProjects };
+        return {
+          ...prev,
+          projects: prev.projects.map((p) =>
+            p.id === projectId ? { ...p, notes: [newNote, ...p.notes] } : p
+          )
+        };
       });
     });
   }, []);
@@ -536,14 +590,16 @@ export function usePlatformStore() {
   const addProjectDiscussion = useCallback((projectId: string, content: string) => {
     if (!content.trim()) return;
     projectsApi.addDiscussion(projectId, content).then((newMsg) => {
-      setStoreState((prev) => {
-        const updatedProjects = prev.projects.map((p) => {
-          if (p.id === projectId) return { ...p, discussions: [...p.discussions, newMsg as unknown as import('./mock-data').ProjectDiscussion] };
-          return p;
-        });
-        return { ...prev, projects: updatedProjects };
-      });
-    }).catch(() => {
+      setStoreState((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) =>
+          p.id === projectId
+            ? { ...p, discussions: [...p.discussions, newMsg as unknown as import('./mock-data').ProjectDiscussion] }
+            : p
+        )
+      }));
+    }).catch((err) => {
+      reportWriteError('Discussion sync failed', err);
       const currentUser = getStoreState().user;
       setStoreState((prev) => {
         const newMsg = {
@@ -553,44 +609,49 @@ export function usePlatformStore() {
           content: content.trim(),
           timestamp: 'Just now'
         };
-        const updatedProjects = prev.projects.map((p) => {
-          if (p.id === projectId) return { ...p, discussions: [...p.discussions, newMsg] };
-          return p;
-        });
-        return { ...prev, projects: updatedProjects };
+        return {
+          ...prev,
+          projects: prev.projects.map((p) =>
+            p.id === projectId ? { ...p, discussions: [...p.discussions, newMsg] } : p
+          )
+        };
       });
     });
   }, []);
 
   const inviteCollaborator = useCallback((projectId: string, email: string, role: 'Owner' | 'Editor' | 'Viewer') => {
-    projectsApi.inviteMember(projectId, email, role).then((newMember) => {
-      setStoreState((prev) => {
-        const updatedProjects = prev.projects.map((p) => {
-          if (p.id === projectId) return { ...p, members: [...p.members, newMember as unknown as import('./mock-data').WorkspaceProject['members'][0]] };
-          return p;
-        });
-        return { ...prev, projects: updatedProjects };
-      });
-    }).catch(() => {
+    projectsApi.inviteMember(projectId, email, role).then((proj) => {
+      const members = (proj as unknown as WorkspaceProject).members;
+      setStoreState((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) =>
+          p.id === projectId
+            ? { ...p, members: Array.isArray(members) ? members : [...p.members, proj as unknown as WorkspaceProject['members'][0]] }
+            : p
+        )
+      }));
+    }).catch((err) => {
+      reportWriteError('Member invite sync failed', err);
       const nameFromEmail = email.split('@')[0].replace('.', ' ');
       setStoreState((prev) => {
         const newMember = {
           name: nameFromEmail.charAt(0).toUpperCase() + nameFromEmail.slice(1),
           role,
           email,
-          avatar: `https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=400&auto=format&fit=crop&q=80`
+          avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=400&auto=format&fit=crop&q=80'
         };
-        const updatedProjects = prev.projects.map((p) => {
-          if (p.id === projectId) return { ...p, members: [...p.members, newMember] };
-          return p;
-        });
-        return { ...prev, projects: updatedProjects };
+        return {
+          ...prev,
+          projects: prev.projects.map((p) =>
+            p.id === projectId ? { ...p, members: [...p.members, newMember] } : p
+          )
+        };
       });
     });
   }, []);
 
   const markNotificationRead = useCallback((id: string) => {
-    notificationsApi.markRead(id).catch(() => {});
+    notificationsApi.markRead(id).catch((err) => reportWriteError('Notification update failed', err));
     setStoreState((prev) => ({
       ...prev,
       notifications: prev.notifications.map((n) => (n.id === id ? { ...n, read: true } : n))
@@ -598,7 +659,7 @@ export function usePlatformStore() {
   }, []);
 
   const markAllNotificationsRead = useCallback(() => {
-    notificationsApi.markAllRead().catch(() => {});
+    notificationsApi.markAllRead().catch((err) => reportWriteError('Notifications update failed', err));
     setStoreState((prev) => ({
       ...prev,
       notifications: prev.notifications.map((n) => ({ ...n, read: true }))
@@ -615,7 +676,8 @@ export function usePlatformStore() {
   const updateProfile = useCallback((updatedProfile: Partial<UserProfile>) => {
     authApi.updateProfile(updatedProfile).then((profile) => {
       setStoreState((prev) => ({ ...prev, user: profile as unknown as UserProfile }));
-    }).catch(() => {
+    }).catch((err) => {
+      reportWriteError('Profile saved locally', err);
       setStoreState((prev) => ({ ...prev, user: { ...prev.user, ...updatedProfile } }));
     });
   }, []);
@@ -644,7 +706,8 @@ export function usePlatformStore() {
         ...prev,
         manuscripts: [newMs as unknown as ManuscriptSubmission, ...prev.manuscripts]
       }));
-    }).catch(() => {
+    }).catch((err) => {
+      reportWriteError('Manuscript saved locally', err);
       setStoreState((prev) => ({
         ...prev,
         manuscripts: [manuscript, ...prev.manuscripts]
@@ -665,6 +728,12 @@ export function usePlatformStore() {
     trendingTopics: state.trendingTopics,
     manuscripts: state.manuscripts,
     searchHistory: state.searchHistory,
+    backendStatus: state.backendStatus,
+    syncError: state.syncError,
+    writeError: state.writeError,
+    retrySync,
+    clearWriteError,
+    logout,
     toggleSavePaper,
     toggleFollowResearcher,
     toggleLikePost,

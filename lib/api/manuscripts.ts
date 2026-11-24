@@ -53,11 +53,22 @@ export const manuscriptsApi = {
   updateStatus: (id: string, status: string) =>
     api.patch<Manuscript>(`/api/v1/manuscripts/${id}/status`, { status }),
 
-  uploadFile: (id: string, _file: File) => {
-    // File upload — backend expects multipart, but for now POST metadata
-    return api.post<{ ok: boolean }>(`/api/v1/manuscripts/${id}/file`, {});
+  uploadFile: async (id: string, file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const { API_BASE, getAccessToken } = await import('./client');
+    const headers: Record<string, string> = {};
+    const tok = getAccessToken();
+    if (tok) headers['Authorization'] = `Bearer ${tok}`;
+    const res = await fetch(`${API_BASE}/api/v1/manuscripts/${id}/file`, {
+      method: 'POST',
+      headers,
+      body: form,
+    });
+    if (!res.ok) throw new Error(`File upload failed: ${res.status}`);
+    return res.json() as Promise<Manuscript>;
   },
 
   aiPreReview: (id: string) =>
-    api.post<AIReview>(`/api/v1/manuscripts/${id}/ai-prereview`),
+    api.post<{ aiReview: AIReview; manuscriptId: string }>(`/api/v1/manuscripts/${id}/ai-prereview`),
 };

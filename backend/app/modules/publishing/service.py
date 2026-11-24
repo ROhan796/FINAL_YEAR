@@ -132,6 +132,63 @@ class PublishingService:
         self.db.refresh(row)
         return {"aiReview": self._review_out(review), "manuscriptId": row.id}
 
+    def citation_gaps(
+        self, manuscript_id: str, user: dict[str, Any], draft_text: str = ""
+    ) -> dict[str, Any]:
+        """7.4: Extract methods/algorithms in draft lacking citations and recommend candidate papers."""
+        from sqlalchemy import or_
+        from app.models.paper import Paper
+        from ml.ner import NERPipeline
+
+        row = self.get(manuscript_id, user["id"])
+        text = "\n".join(p for p in [row.title, row.abstract, draft_text] if p)
+        entities = NERPipeline().extract_entities(text)
+        target_types = {"METHOD", "ALGORITHM", "DATASET", "MATERIAL"}
+        seen: set[str] = set()
+        gaps: list[dict[str, Any]] = []
+
+        for ent in entities:
+            if ent.label not in target_types:
+                continue
+            key = ent.text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Check if a citation marker ([1], (2022), et al.) appears near the mention
+            window = text[max(0, ent.start - 20) : min(len(text), ent.end + 80)]
+            if re.search(r"(\[\d+\]|et al\.|\(\d{4}\))", window):
+                continue
+
+            like = f"%{ent.text}%"
+            cands = list(
+                self.db.scalars(
+                    select(Paper)
+                    .where(or_(Paper.title.ilike(like), Paper.abstract.ilike(like)))
+                    .order_by(Paper.citation_count.desc())
+                    .limit(4)
+                ).all()
+            )
+            gaps.append(
+                {
+                    "entity": ent.text,
+                    "entityType": ent.label,
+                    "message": f"You mention '{ent.text}' ({ent.label}) without a nearby citation.",
+                    "candidates": [
+                        {
+                            "id": p.id,
+                            "title": p.title,
+                            "year": p.year,
+                            "venue": p.venue,
+                            "citationCount": p.citation_count,
+                        }
+                        for p in cands
+                    ],
+                }
+            )
+
+        return {"manuscriptId": row.id, "gapCount": len(gaps), "gaps": gaps[:8]}
+
     def set_status(self, manuscript_id: str, user: dict[str, Any], status: str) -> ManuscriptOut:
         if status not in STATUS_ORDER:
             raise ValidationAppError(f"Unknown status '{status}'")

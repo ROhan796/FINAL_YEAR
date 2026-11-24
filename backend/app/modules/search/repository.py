@@ -53,9 +53,12 @@ class SearchRepository:
 
         want_vector = mode in ("semantic", "hybrid") and query_vector is not None
         want_text = mode in ("keyword", "hybrid")
+        want_kg = mode == "hybrid"
 
         vector_rank: dict[str, int] = {}
         text_rank: dict[str, int] = {}
+        kg_rank: dict[str, int] = {}
+        kg_entities: dict[str, list[str]] = {}
 
         if want_vector:
             rows = self._vector_rank(query_vector or [], filters, limit)
@@ -75,6 +78,17 @@ class SearchRepository:
                 if "fts" not in entry.arms:
                     entry.arms.append("fts")
 
+        if want_kg:
+            kg_rows = self._kg_rank(query, filters, limit)
+            kg_rank = {pid: i for i, (pid, _) in enumerate(kg_rows)}
+            if kg_rows:
+                arms_used.append("kg")
+            for pid, matched_ents in kg_rows:
+                entry = candidates.setdefault(pid, RankedPaper(paper=None))  # type: ignore[arg-type]
+                if "kg" not in entry.arms:
+                    entry.arms.append("kg")
+                kg_entities[pid] = matched_ents
+
         # ── Reciprocal Rank Fusion ──────────────────────────────────────
         # Scores from cosine and BM25 are not comparable; rank-based fusion
         # sidesteps normalisation entirely.
@@ -85,6 +99,8 @@ class SearchRepository:
                 score += 1.0 / (RRF_K + vector_rank[pid] + 1)
             if pid in text_rank:
                 score += 1.0 / (RRF_K + text_rank[pid] + 1)
+            if pid in kg_rank:
+                score += 1.0 / (RRF_K + kg_rank[pid] + 1)
             fused[pid] = score
 
         if not candidates:
@@ -98,6 +114,7 @@ class SearchRepository:
             entry.paper = paper
             entry.score = fused.get(paper.id, 0.0)
             entry.matched_terms = [t for t in terms if _appears(t, paper)]
+            entry.matched_entities = kg_entities.get(paper.id, [])
             out.append(entry)
 
         out.sort(key=lambda r: (r.score, r.paper.citation_count), reverse=True)
@@ -141,24 +158,88 @@ class SearchRepository:
             rows = self.db.execute(stmt).all()
             return [(r[0], max(0.0, 1.0 - float(r[1]))) for r in rows if r[1] is not None]
 
-        # SQLite / no-pgvector: exact cosine over the (small) corpus.
+        # SQLite / no-pgvector: two-stage Matryoshka (128-d shortlist -> 768-d exact rerank).
         stmt = _apply_filters(select(Paper).where(Paper.embedding.is_not(None)), filters)
-        best: list[tuple[str, float]] = []
-        q = np.asarray(vector, dtype=np.float64)
-        qn = float(np.linalg.norm(q)) or 1.0
+        valid_ids: list[str] = []
+        valid_vecs: list[np.ndarray] = []
+        q = np.asarray(vector, dtype=np.float32)
         for paper in self.db.scalars(stmt.limit(5000)).all():
             try:
-                e = np.asarray(paper.embedding, dtype=np.float64)
+                e = np.asarray(paper.embedding, dtype=np.float32)
             except (TypeError, ValueError):
                 continue
-            if e.shape != q.shape or e.size == 0:
+            if e.shape != q.shape or e.size == 0 or float(np.linalg.norm(e)) == 0.0:
                 continue
-            denom = float(np.linalg.norm(e)) * qn
-            if denom == 0:
-                continue
-            best.append((paper.id, float(np.dot(q, e) / denom)))
-        best.sort(key=lambda t: t[1], reverse=True)
-        return best[:limit]
+            valid_ids.append(paper.id)
+            valid_vecs.append(e)
+        if not valid_ids:
+            return []
+
+        mat = np.vstack(valid_vecs)
+        if len(valid_ids) > 32 and q.size >= 256:
+            from ml.encoders.matryoshka import two_stage_matryoshka_rank
+
+            return two_stage_matryoshka_rank(
+                q, valid_ids, mat, coarse_dim=128, shortlist_k=max(limit * 2, 120), top_k=limit
+            )
+
+        qn = float(np.linalg.norm(q)) or 1.0
+        norms = np.linalg.norm(mat, axis=1) * qn
+        norms[norms == 0] = 1.0
+        sims = (mat @ q) / norms
+        order = np.argsort(sims)[::-1][:limit]
+        return [(valid_ids[int(i)], float(sims[int(i)])) for i in order]
+
+    def _kg_rank(
+        self, query: str, filters: PaperFilters | None, limit: int
+    ) -> list[tuple[str, list[str]]]:
+        """KG arm: match query terms to KgNode entities and return provenance + 1-hop papers."""
+        from app.models.knowledge import KgEdge, KgNode
+
+        terms = _terms(query)
+        if not terms:
+            return []
+
+        nodes = list(self.db.scalars(select(KgNode)).all())
+        matched_nodes: list[KgNode] = []
+        for n in nodes:
+            name_l = n.normalised_name.lower()
+            if any(t in name_l for t in terms):
+                matched_nodes.append(n)
+        if not matched_nodes:
+            return []
+
+        matched_ids = {n.id for n in matched_nodes}
+        paper_entities: dict[str, list[str]] = {}
+        for n in matched_nodes:
+            if n.paper_id:
+                paper_entities.setdefault(n.paper_id, []).append(n.canonical_name)
+
+        edges = list(
+            self.db.scalars(
+                select(KgEdge).where(or_(KgEdge.src_id.in_(matched_ids), KgEdge.dst_id.in_(matched_ids)))
+            ).all()
+        )
+        node_names = {n.id: n.canonical_name for n in matched_nodes}
+        for e in edges:
+            if e.provenance_paper_id:
+                label = node_names.get(e.src_id) or node_names.get(e.dst_id) or e.relation
+                paper_entities.setdefault(e.provenance_paper_id, []).append(label)
+
+        if not paper_entities:
+            return []
+
+        # Respect filters on candidate paper IDs
+        allowed = set(
+            self.db.scalars(_apply_filters(select(Paper.id), filters).where(Paper.id.in_(paper_entities.keys()))).all()
+        )
+        ranked = [
+            (pid, sorted(set(ents)))
+            for pid, ents in paper_entities.items()
+            if pid in allowed
+        ]
+        ranked.sort(key=lambda t: len(t[1]), reverse=True)
+        return ranked[:limit]
 
     def _text_rank(self, query: str, filters: PaperFilters | None, limit: int) -> list[str]:
         stmt = select(Paper.id)

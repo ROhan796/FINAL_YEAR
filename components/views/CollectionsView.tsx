@@ -1,10 +1,12 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Bookmark, FolderPlus, Sparkles, Share2, Trash2, BookOpen } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Bookmark, FolderPlus, Sparkles, Share2, Trash2, BookOpen, Layers, GitBranch } from 'lucide-react';
 import { usePlatformStore } from '@/lib/platform-store';
 import { PaperCard } from '../PaperCard';
 import { Paper } from '@/lib/mock-data';
+import { collectionsApi, insightsApi } from '@/lib/api';
+import type { CollectionCluster, CrossCollectionInsight } from '@/lib/api/insights';
 
 interface CollectionsViewProps {
   onOpenPaperDetail: (paper: Paper) => void;
@@ -26,9 +28,23 @@ export const CollectionsView: React.FC<CollectionsViewProps> = ({
 
   const [aiSummary, setAiSummary] = useState<string>('');
   const [isSummarizing, setIsSummarizing] = useState(false);
+  const [clusters, setClusters] = useState<CollectionCluster[]>([]);
+  const [crossInsights, setCrossInsights] = useState<CrossCollectionInsight[]>([]);
 
   const collection = collections.find((c) => c.id === selectedColId) || collections[0];
   const colPapers = collection ? papers.filter((p) => collection.paperIds.includes(p.id)) : [];
+
+  useEffect(() => {
+    insightsApi.crossCollection(4).then(setCrossInsights).catch(() => setCrossInsights([]));
+  }, [collections.length]);
+
+  useEffect(() => {
+    if (!collection) return;
+    insightsApi
+      .collectionClusters(collection.id)
+      .then((res) => setClusters(res.clusters || []))
+      .catch(() => setClusters([]));
+  }, [collection?.id, colPapers.length]);
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,24 +56,30 @@ export const CollectionsView: React.FC<CollectionsViewProps> = ({
   };
 
   const handleGenerateAISynthesis = async () => {
-    if (colPapers.length === 0) return;
+    if (colPapers.length === 0 || !collection) return;
     setIsSummarizing(true);
     try {
-      const firstPaper = colPapers[0];
-      const res = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: collection.name,
-          abstract: collection.description + ' Papers in collection: ' + colPapers.map((p) => p.title).join('; ')
-        })
-      });
-      const data = await res.json();
-      if (data.executiveSummary) {
-        setAiSummary(data.executiveSummary);
+      const res = await collectionsApi.aiOverview(collection.id);
+      if (res.executiveSummary || res.summary) {
+        setAiSummary(res.executiveSummary || res.summary);
+        return;
       }
-    } catch (e) {
-      console.error(e);
+    } catch {
+      // fallback to legacy route
+      try {
+        const res = await fetch('/api/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: collection.name,
+            abstract: collection.description + ' Papers in collection: ' + colPapers.map((p) => p.title).join('; ')
+          })
+        });
+        const data = await res.json();
+        if (data.executiveSummary) setAiSummary(data.executiveSummary);
+      } catch (e) {
+        console.error(e);
+      }
     } finally {
       setIsSummarizing(false);
     }
@@ -209,7 +231,49 @@ export const CollectionsView: React.FC<CollectionsViewProps> = ({
                     <p className="leading-relaxed">{aiSummary}</p>
                   </div>
                 )}
+
+                {/* 6.E Contrastive Collection Clustering */}
+                {clusters.length > 0 && (
+                  <div className="bg-[#f0eee6] border border-[#cccbc8] rounded-xl p-4 space-y-2.5">
+                    <span className="font-sans text-xs font-bold uppercase tracking-wider text-[#141413] flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-[#d97757]" /> Auto-Discovered Topic Clusters (K-Means + TF-IDF)
+                    </span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      {clusters.map((cl) => (
+                        <div key={cl.clusterId} className="bg-[#faf9f5] border border-[#cccbc8] rounded-xl p-3 space-y-1">
+                          <div className="font-sans text-xs font-bold text-[#141413]">{cl.label}</div>
+                          <div className="font-sans text-[11px] text-[#87867f]">
+                            {cl.paperIds.length} paper(s) • {cl.topTerms.join(', ')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
+
+              {/* 7.3 Cross-Collection Bridging Insights */}
+              {crossInsights.length > 0 && (
+                <div className="bg-[#faf9f5] border border-[#cccbc8] rounded-2xl p-5 space-y-3">
+                  <span className="font-sans text-xs font-bold uppercase tracking-wider text-[#d97757] flex items-center gap-1.5">
+                    <GitBranch className="w-3.5 h-3.5" /> Cross-Collection Bridging Papers
+                  </span>
+                  <div className="space-y-2.5">
+                    {crossInsights.map((ins, i) => (
+                      <div key={i} className="bg-[#f0eee6] border border-[#cccbc8] rounded-xl p-3 space-y-1.5">
+                        <div className="font-serif text-sm font-medium text-[#141413]">{ins.headline}</div>
+                        <div className="flex flex-wrap gap-2">
+                          {ins.bridgingPapers.map((bp) => (
+                            <span key={bp.id} className="font-sans text-[11px] bg-[#faf9f5] border border-[#cccbc8] px-2.5 py-1 rounded-lg">
+                              {bp.title.slice(0, 48)} ({bp.year})
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Papers List in Collection */}
               <div className="space-y-4">

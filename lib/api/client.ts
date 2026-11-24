@@ -23,15 +23,21 @@ export function setTokens(access: string, refresh: string) {
   if (typeof window !== 'undefined') {
     localStorage.setItem('ckgai_access_token', access);
     localStorage.setItem('ckgai_refresh_token', refresh);
+    document.cookie = 'ckgai_auth=1; path=/; max-age=2592000; SameSite=Lax';
+    document.cookie = 'ckgai_logged_out=; path=/; max-age=0';
   }
 }
 
-export function clearTokens() {
+export function clearTokens(explicitLogout: boolean = false) {
   accessToken = null;
   refreshToken = null;
   if (typeof window !== 'undefined') {
     localStorage.removeItem('ckgai_access_token');
     localStorage.removeItem('ckgai_refresh_token');
+    document.cookie = 'ckgai_auth=; path=/; max-age=0';
+    if (explicitLogout) {
+      document.cookie = 'ckgai_logged_out=1; path=/; max-age=86400; SameSite=Lax';
+    }
   }
 }
 

@@ -95,6 +95,10 @@ def create_app() -> FastAPI:
 
     register_exception_handlers(app)
 
+    from app.core.telemetry import configure_telemetry
+
+    configure_telemetry(app)
+
     app.include_router(v1)
     app.include_router(legacy)
 

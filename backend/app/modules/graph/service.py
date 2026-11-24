@@ -216,11 +216,51 @@ class GraphService:
         if useful:
             row.useful_votes = int(row.useful_votes or 0) + 1
         else:
-            # Two dismissals or an explicit "not useful" retires the suggestion.
             row.dismissed = True
         self.db.commit()
+
+        # Recalibrate Platt scaling weights from stored feedback
+        try:
+            from ml.discovery.calibration import recalibrate_from_db
+
+            recalibrate_from_db(self.db, checkpoint_dir=settings.ml_checkpoint_dir)
+        except Exception:  # noqa: BLE001
+            pass
+
         self.db.refresh(row)
         return self._out(row)
+
+    def retrain_discoveries(self, train_gnn: bool = True, epochs: int = 25) -> dict[str, Any]:
+        from ml.discovery.calibration import recalibrate_from_db
+        from ml.pipelines.discovery import DiscoveryPipeline
+
+        res = DiscoveryPipeline(self.db).run(train=train_gnn, epochs=epochs, persist=True)
+        cal = recalibrate_from_db(self.db, checkpoint_dir=settings.ml_checkpoint_dir)
+        return {
+            "modelTrained": res.model_trained,
+            "discoveriesCount": len(res.discoveries),
+            "persisted": res.persisted_count,
+            "hitsAt10": round(res.hits_at_10, 4),
+            "mrr": round(res.mrr, 4),
+            "calibration": cal,
+        }
+
+    def project_neo4j(self, full: bool = False) -> dict[str, Any]:
+        from ml.graph.projector import Neo4jProjector
+
+        res = Neo4jProjector(self.db).project(full=full)
+        return {
+            "status": res.status,
+            "nodesProjected": res.nodes_projected,
+            "edgesProjected": res.edges_projected,
+            "watermark": res.watermark,
+            "error": res.error,
+        }
+
+    def projection_state(self) -> dict[str, Any]:
+        from ml.graph.projector import Neo4jProjector
+
+        return Neo4jProjector(self.db).state()
 
     def _nodes(self, ids: set[str]) -> dict[str, KgNode]:
         if not ids:
@@ -254,10 +294,6 @@ class GraphService:
             domain=node.domain,
             degree=int(node.mention_count or 0),
         )
-
-    @staticmethod
-    def projection_state() -> dict[str, Any]:
-        return {"available": True}
 
 
 _driver: Any = None

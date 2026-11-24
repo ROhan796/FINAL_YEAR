@@ -58,6 +58,19 @@ def ai_prereview(manuscript_id: str, db: DbSession, user: CurrentUserDep) -> Any
     return PublishingService(db).prereview(manuscript_id, user)
 
 
+@router.post("/{manuscript_id}/citation-gaps")
+def citation_gaps(
+    manuscript_id: str,
+    db: ReadDbSession,
+    user: CurrentUserDep,
+    draftText: str = "",
+) -> dict[str, Any]:
+    """7.4: Detect methods mentioned without citations and suggest KG/corpus papers."""
+    from app.modules.publishing.service import PublishingService
+
+    return PublishingService(db).citation_gaps(manuscript_id, user, draft_text=draftText)
+
+
 @router.patch("/{manuscript_id}/status", response_model=ManuscriptOut)
 def set_status(
     manuscript_id: str,

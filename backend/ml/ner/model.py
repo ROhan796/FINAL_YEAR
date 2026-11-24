@@ -53,19 +53,24 @@ class GazetteerNER:
         "METHOD": [
             "convolutional neural network", "cnn", "lstm", "rnn", "transformer",
             "random forest", "support vector machine", "svm", "k-means",
-            "pca", "crispr", "pcr", "gel electrophoresis", "western blot",
+            "pca", "crispr", "crispr-cas9", "pcr", "gel electrophoresis", "western blot",
             "mass spectrometry", "x-ray crystallography", "mri", "fmri",
             "deep learning", "machine learning", "transfer learning",
             "reinforcement learning", "generative adversarial network", "gan",
             "attention mechanism", "self-attention", "multi-head attention",
             "gradient descent", "backpropagation", "batch normalization",
+            "graph neural network", "graph attention network", "gnn", "gat", "r-gcn",
+            "contrastive learning", "specter2", "scibert", "bert", "roberta",
+            "vision transformer", "vit", "diffusion model", "alphafold",
+            "molecular docking", "biosensor", "field-effect transistor",
+            "knowledge graph", "link prediction", "pre-training", "fine-tuning",
         ],
         "MATERIAL": [
             "graphene", "carbon nanotube", "titanium dioxide", "silicon carbide",
             "perovskite", "molybdenum disulfide", "gold nanoparticle",
             "silver nanoparticle", "quantum dot", "polymer", "hydrogel",
-            "lipid nanoparticle", "mRNA", "dna", "rna", "protein",
-            "antibody", "enzyme", "cellulose", "chitosan",
+            "lipid nanoparticle", "mrna", "dna", "rna", "protein",
+            "antibody", "enzyme", "cellulose", "chitosan", "nanomaterial",
         ],
         "DISEASE": [
             "alzheimer", "parkinson", "cancer", "diabetes", "obesity",
@@ -73,6 +78,7 @@ class GazetteerNER:
             "hiv", "covid", "covid-19", "sars-cov-2", "hepatitis",
             "glioblastoma", "melanoma", "leukemia", "lymphoma",
             "autoimmune", "inflammation", "neurodegeneration",
+            "sickle cell disease", "neurodegenerative disease", "beta-thalassemia",
         ],
         "ALGORITHM": [
             "gradient descent", "adam optimizer", "sgd", "random forest",
@@ -80,12 +86,13 @@ class GazetteerNER:
             "backpropagation", "bayesian optimization", "genetic algorithm",
             "simulated annealing", "neural network", "convolution",
             "recurrent neural network", "long short-term memory",
+            "distmult", "transe", "reciprocal rank fusion", "viterbi",
         ],
         "DATASET": [
             "imagenet", "mnist", "cifar", "cifar-10", "cifar-100",
             "coco", "open images", "chembl", "pubmed", "uniprot",
-            "genbank", "pdb", "scibert", "arxiv", "medline",
-            "snli", "squad", "glue", "superglue",
+            "genbank", "pdb", "scierc", "arxiv", "medline",
+            "snli", "squad", "glue", "superglue", "cora", "citeseer",
         ],
         "PHENOMENON": [
             "quantum entanglement", "photosynthesis", "neuroplasticity",
@@ -93,18 +100,20 @@ class GazetteerNER:
             "diffusion", "osmosis", "fluorescence", "bioluminescence",
             "electromagnetic", "magnetism", "gravitational wave",
             "dark matter", "dark energy", "photon", "electron",
+            "protein folding", "over-smoothing", "anisotropy",
         ],
         "METRIC": [
             "accuracy", "precision", "recall", "f1 score", "f1-score",
             "auc-roc", "auc", "rmse", "mse", "mae", "r-squared",
             "bleu score", "rouge", "perplexity", "log loss",
-            "sensitivity", "specificity", "ppv", "npv",
+            "sensitivity", "specificity", "ppv", "npv", "mrr", "hits@10",
         ],
         "CHEMICAL": [
             "dopamine", "serotonin", "glucose", "atp", "nad", "nadh",
             "co2", "o2", "h2o", "ethanol", "methanol", "acetone",
             "caffeine", "aspirin", "ibuprofen", "metformin",
             "penicillin", "doxorubicin", "cisplatin", "insulin",
+            "beta-amyloid", "fetal hemoglobin", "bcl11a",
         ],
     }
 
@@ -143,56 +152,90 @@ class GazetteerNER:
 class TransformerNER:
     """Transformer-based NER model.
 
-    Architecture: SciBERT + token classification head + optional CRF.
-
-    This class defines the architecture and interface. When no trained
-    checkpoint is available, it uses the GazetteerNER fallback.
-
-    TRAINING STATUS: Architecture defined, no trained checkpoint included.
+    Architecture: SciBERT + token classification head + LinearChainCRF.
+    Loads trained checkpoint `ner_head.pt` from `ml_checkpoint_dir` when present,
+    combining neural CRF predictions with GazetteerNER for high recall.
     """
 
-    def __init__(self, model_name: str = "allenai/scibert_scivocab_uncased",
-                 device: str = "cpu") -> None:
+    def __init__(
+        self,
+        model_name: str = "allenai/scibert_scivocab_uncased",
+        device: str = "cpu",
+        checkpoint_path: str | None = None,
+    ) -> None:
         self.model_name = model_name
         self.device = device
+        self.checkpoint_path = checkpoint_path
         self._model = None
+        self._head = None
         self._tokenizer = None
+        self._crf = None
+        self._has_trained_checkpoint = False
         self._gazetteer = GazetteerNER()
 
+    def _resolve_checkpoint(self):
+        from pathlib import Path
+
+        if self.checkpoint_path:
+            return Path(self.checkpoint_path)
+        try:
+            from app.core.config import settings
+
+            return Path(settings.ml_checkpoint_dir) / "ner_head.pt"
+        except Exception:
+            return Path("./models/checkpoints/ner_head.pt")
+
     def _load(self) -> bool:
-        if self._model is not None:
+        if self._model is not None and self._has_trained_checkpoint:
             return True
+        ckpt_path = self._resolve_checkpoint()
+        if not ckpt_path.exists():
+            return False
         try:
             import torch
-            from transformers import AutoModelForTokenClassification, AutoTokenizer
+            import torch.nn as nn
+            from transformers import AutoModel, AutoTokenizer
 
-            log.info("loading_ner_model: %s", self.model_name)
+            from ml.ner.crf import LinearChainCRF
+
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self._model = AutoModelForTokenClassification.from_pretrained(
-                self.model_name,
-                num_labels=NUM_TAGS,
-                ignore_mismatched_sizes=True,
-            ).to(self.device)
+            self._model = AutoModel.from_pretrained(self.model_name).to(self.device)
             self._model.eval()
+
+            hidden_size = int(ckpt.get("hidden_size", 768))
+            head = nn.Sequential(nn.Dropout(0.1), nn.Linear(hidden_size, NUM_TAGS)).to(self.device)
+            head.load_state_dict(ckpt["head_state_dict"])
+            head.eval()
+            self._head = head
+
+            crf = LinearChainCRF(NUM_TAGS)
+            crf.load_transitions(
+                ckpt["crf_transitions"],
+                start_transitions=ckpt.get("crf_start"),
+            )
+            self._crf = crf
+            self._has_trained_checkpoint = True
+            log.info("loaded_trained_ner_checkpoint: %s", ckpt_path)
             return True
         except Exception as exc:
             log.warning("ner_model_load_failed: %s", exc)
             return False
 
     def predict(self, text: str) -> NERResult:
-        """Run NER on input text.
-
-        If a trained transformer is available, uses it.
-        Otherwise falls back to gazetteer-based extraction.
-        """
+        """Run NER on input text (trained SciBERT+CRF when checkpoint exists, else gazetteer)."""
         if not self._load():
             return self._gazetteer_predict(text)
-        return self._transformer_predict(text)
+        res = self._transformer_predict(text)
+        # Supplement with high-precision gazetteer matches not already spanned
+        gaz = self._gazetteer.extract(text)
+        existing_lower = {e.text.lower() for e in res.entities}
+        merged = list(res.entities) + [e for e in gaz if e.text.lower() not in existing_lower]
+        return NERResult(entities=merged, tags=res.tags, tokens=res.tokens, model_used=res.model_used)
 
     def _gazetteer_predict(self, text: str) -> NERResult:
         """Gazetteer-based fallback NER."""
         entities = self._gazetteer.extract(text)
-        # Create dummy BIO tags for the result
         tokens = text.split()
         tags = ["O"] * len(tokens)
         return NERResult(
@@ -203,37 +246,44 @@ class TransformerNER:
         )
 
     def _transformer_predict(self, text: str) -> NERResult:
-        """Transformer-based NER prediction.
-
-        NOTE: This requires a fine-tuned checkpoint for meaningful results.
-        Without fine-tuning, the model's token classification head has
-        random weights and will produce arbitrary predictions.
-        """
+        """Trained SciBERT + token head + CRF Viterbi decode."""
         import torch
 
-        tokens = self._tokenizer.tokenize(text)
+        words = text.split()
+        if not words:
+            return NERResult(entities=[], tags=[], tokens=[], model_used="transformer+crf")
+
         encoded = self._tokenizer(
-            text,
+            words,
+            is_split_into_words=True,
             return_tensors="pt",
             truncation=True,
             max_length=512,
         ).to(self.device)
 
         with torch.no_grad():
-            outputs = self._model(**encoded)
-            logits = outputs.logits
-            predictions = torch.argmax(logits, dim=-1)[0]
+            hidden = self._model(**encoded).last_hidden_state[0]
+            word_ids = encoded.word_ids(batch_index=0)
+            word_vecs = []
+            prev = None
+            for pos, wid in enumerate(word_ids):
+                if wid is None or wid == prev:
+                    continue
+                prev = wid
+                word_vecs.append(hidden[pos])
+            if not word_vecs:
+                return NERResult(entities=[], tags=["O"] * len(words), tokens=words, model_used="transformer+crf")
+            logits = self._head(torch.stack(word_vecs)).cpu().numpy()
 
-        tags = [ID2TAG.get(p.item(), "O") for p in predictions]
-        # Remove special tokens
-        tags = tags[1:-1]  # remove [CLS] and [SEP]
-        entities = bio_tags_to_entities(tags, tokens[:len(tags)])
+        tag_ids = self._crf.decode(logits) if self._crf is not None else logits.argmax(axis=1).tolist()
+        tags = [ID2TAG.get(t, "O") for t in tag_ids]
+        entities = bio_tags_to_entities(tags, words[: len(tags)])
 
         return NERResult(
             entities=entities,
             tags=tags,
-            tokens=tokens,
-            model_used="transformer+crf" if hasattr(self, '_crf') else "transformer",
+            tokens=words[: len(tags)],
+            model_used="transformer+crf",
         )
 
 

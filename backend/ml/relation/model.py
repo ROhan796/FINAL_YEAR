@@ -97,25 +97,61 @@ class TransformerRE:
     uses co-occurrence fallback.
     """
 
-    def __init__(self, model_name: str = "allenai/scibert_scivocab_uncased",
-                 device: str = "cpu") -> None:
+    def __init__(
+        self,
+        model_name: str = "allenai/scibert_scivocab_uncased",
+        device: str = "cpu",
+        checkpoint_path: str | None = None,
+    ) -> None:
         self.model_name = model_name
         self.device = device
+        self.checkpoint_path = checkpoint_path
         self._model = None
+        self._clf = None
         self._tokenizer = None
+        self._has_trained_checkpoint = False
         self._fallback = CooccurrenceRE()
 
+    def _resolve_checkpoint(self):
+        from pathlib import Path
+
+        if self.checkpoint_path:
+            return Path(self.checkpoint_path)
+        try:
+            from app.core.config import settings
+
+            return Path(settings.ml_checkpoint_dir) / "re_head.pt"
+        except Exception:
+            return Path("./models/checkpoints/re_head.pt")
+
     def _load(self) -> bool:
-        if self._model is not None:
+        if self._model is not None and self._has_trained_checkpoint:
             return True
+        ckpt_path = self._resolve_checkpoint()
+        if not ckpt_path.exists():
+            return False
         try:
             import torch
+            import torch.nn as nn
             from transformers import AutoModel, AutoTokenizer
 
-            log.info("loading_re_model: %s", self.model_name)
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self._model = AutoModel.from_pretrained(self.model_name).to(self.device)
             self._model.eval()
+
+            pair_dim = int(ckpt.get("pair_dim", 768 * 4))
+            clf = nn.Sequential(
+                nn.Linear(pair_dim, 256),
+                nn.ReLU(),
+                nn.Dropout(0.15),
+                nn.Linear(256, NUM_RELATIONS),
+            ).to(self.device)
+            clf.load_state_dict(ckpt["state_dict"])
+            clf.eval()
+            self._clf = clf
+            self._has_trained_checkpoint = True
+            log.info("loaded_trained_re_checkpoint: %s", ckpt_path)
             return True
         except Exception as exc:
             log.warning("re_model_load_failed: %s", exc)
@@ -123,6 +159,8 @@ class TransformerRE:
 
     def predict(self, sentence: str, entities: list[dict]) -> REResult:
         """Extract relations from entity pairs in a sentence."""
+        if len(entities) < 2:
+            return REResult(relations=[], model_used="none")
         if not self._load():
             return REResult(
                 relations=self._fallback.predict(sentence, entities),
@@ -131,13 +169,9 @@ class TransformerRE:
         return self._transformer_predict(sentence, entities)
 
     def _transformer_predict(self, sentence: str, entities: list[dict]) -> REResult:
-        """Transformer-based RE prediction.
-
-        NOTE: Without fine-tuned weights, this produces random predictions.
-        """
+        """Trained SciBERT + pair MLP classifier with type-constraint masking."""
         import torch
 
-        # Encode the full sentence
         encoded = self._tokenizer(
             sentence,
             return_tensors="pt",
@@ -146,32 +180,56 @@ class TransformerRE:
         ).to(self.device)
 
         with torch.no_grad():
-            outputs = self._model(**encoded)
-            hidden = outputs.last_hidden_state  # (1, seq_len, 768)
-            cls_embedding = hidden[0, 0, :]  # (768,)
+            hidden = self._model(**encoded).last_hidden_state[0]
+            cls_embedding = hidden[0]
+            seq_tokens = self._tokenizer.convert_ids_to_tokens(encoded["input_ids"][0])
 
-        # For each entity pair, build pair representation and classify
+        def _span_vec(span_text: str):
+            toks = set(self._tokenizer.tokenize(span_text.lower()))
+            idxs = [k for k, t in enumerate(seq_tokens) if t.lstrip("#").lower() in toks]
+            if idxs:
+                return hidden[idxs].mean(dim=0)
+            return hidden[1:-1].mean(dim=0) if hidden.size(0) > 2 else cls_embedding
+
         relations: list[ExtractedRelation] = []
         for i, e1 in enumerate(entities):
+            h_e1 = _span_vec(e1["text"])
             for j, e2 in enumerate(entities):
-                if i >= j:
+                if i >= j or e1["text"].lower() == e2["text"].lower():
                     continue
-                # Get entity span embeddings (simplified — would need token alignment)
-                h_e1 = cls_embedding  # placeholder
-                h_e2 = cls_embedding  # placeholder
-                # Pair representation: [h_e1 || h_e2 || h_e1⊙h_e2 || h_cls]
-                pair_repr = torch.cat([
-                    h_e1, h_e2, h_e1 * h_e2, cls_embedding
-                ])  # (3072,)
+                h_e2 = _span_vec(e2["text"])
+                pair_repr = torch.cat([h_e1, h_e2, h_e1 * h_e2, cls_embedding], dim=-1).unsqueeze(0)
+                with torch.no_grad():
+                    logits = self._clf(pair_repr)[0].clone()
 
-                # In a real implementation, this goes through an MLP classifier
-                # For now, use co-occurrence fallback
-                pass
+                # Apply type-constraint mask before softmax
+                for rel_idx, rel_name in enumerate(RELATION_LABELS):
+                    if rel_name == "no_relation":
+                        continue
+                    if not are_type_compatible(e1.get("label", ""), e2.get("label", ""), rel_name):
+                        logits[rel_idx] = -1e9
 
-        return REResult(
-            relations=self._fallback.predict(sentence, entities),
-            model_used="transformer-placeholder",
-        )
+                probs = torch.softmax(logits, dim=-1)
+                best_idx = int(torch.argmax(probs).item())
+                rel_name = ID2REL.get(best_idx, "no_relation")
+                conf = float(probs[best_idx].item())
+                if rel_name != "no_relation" and conf >= 0.25:
+                    relations.append(
+                        ExtractedRelation(
+                            head=e1["text"],
+                            tail=e2["text"],
+                            relation=rel_name,
+                            confidence=round(conf, 4),
+                            head_type=e1.get("label", ""),
+                            tail_type=e2.get("label", ""),
+                        )
+                    )
+
+        if not relations:
+            relations = self._fallback.predict(sentence, entities)
+            return REResult(relations=relations, model_used="transformer+cooccurrence")
+
+        return REResult(relations=relations, model_used="transformer+mlp")
 
 
 class REPipeline:

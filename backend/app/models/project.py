@@ -195,3 +195,27 @@ class ProjectTimeEntry(UUIDPrimaryKey, Base):
     day: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     hours: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
+
+
+class ReadingAnnotation(UUIDPrimaryKey, TimestampMixin, Base):
+    """Shared Reading Room inline annotation linked to a paper/chunk sentence inside a project."""
+
+    __tablename__ = "reading_annotations"
+
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    paper_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("papers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    chunk_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("paper_chunks.id", ondelete="SET NULL"), index=True
+    )
+    sentence_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    highlight_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False)
+    author_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("users.id", ondelete="SET NULL"))
+    author_name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    author_avatar: Mapped[str] = mapped_column(String(1024), default="", nullable=False)
+
+    __table_args__ = (Index("ix_reading_ann_proj_paper", "project_id", "paper_id"),)

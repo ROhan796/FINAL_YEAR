@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   FolderKanban,
   Plus,
@@ -16,7 +16,9 @@ import {
   Clock,
   Layers,
   ArrowRight,
-  ChevronRight
+  ChevronRight,
+  BookOpen,
+  Trash2
 } from 'lucide-react';
 import {
   BarChart,
@@ -28,12 +30,8 @@ import {
   CartesianGrid,
   Cell
 } from 'recharts';
-
-interface TimeAllocationData {
-  paper: string;
-  fullName: string;
-  hours: number;
-}
+import { api, API_BASE, getAccessToken, insightsApi, projectsApi } from '@/lib/api';
+import type { ReadingAnnotation } from '@/lib/api/insights';
 import { usePlatformStore } from '@/lib/platform-store';
 import { PaperCard } from '../PaperCard';
 import { Paper, WorkspaceProject } from '@/lib/mock-data';
@@ -63,7 +61,22 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   } = usePlatformStore();
 
   const [selectedProjectId, setSelectedProjectId] = useState<string>(projects[0]?.id || '');
-  const [activeSubTab, setActiveSubTab] = useState<'Overview' | 'Papers' | 'Notes' | 'Tasks' | 'Datasets' | 'Discussion' | 'AI Assistant'>('Overview');
+  const [activeSubTab, setActiveSubTab] = useState<
+    'Overview' | 'Papers' | 'Reading Room' | 'Notes' | 'Tasks' | 'Datasets' | 'Discussion' | 'AI Assistant'
+  >('Overview');
+  const [analytics, setAnalytics] = useState<{
+    totalHours: number;
+    papersAdded: number;
+    notesCreated: number;
+    tasksCompleted: number;
+    tasksTotal: number;
+    chart: { date: string; papersAdded: number; notesCreated: number; tasksCompleted: number }[];
+  } | null>(null);
+  const [readingPaperId, setReadingPaperId] = useState<string>('');
+  const [annotations, setAnnotations] = useState<ReadingAnnotation[]>([]);
+  const [selectedSentenceIdx, setSelectedSentenceIdx] = useState<number | null>(null);
+  const [annComment, setAnnComment] = useState('');
+  const [ragSources, setRagSources] = useState<{ paper_id?: string; section?: string }[]>([]);
 
   // Task form state
   const [taskTitle, setTaskTitle] = useState('');
@@ -94,6 +107,25 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   const [isChatLoading, setIsChatLoading] = useState(false);
 
   const project = projects.find((p) => p.id === selectedProjectId) || projects[0];
+
+  useEffect(() => {
+    if (!project) return;
+    projectsApi.getAnalytics(project.id).then(setAnalytics).catch(() => setAnalytics(null));
+    api
+      .get<{ sender: 'user' | 'assistant'; text: string }[]>(`/api/v1/projects/${project.id}/ai-thread`)
+      .then((turns) => {
+        if (turns?.length) setChatMessages(turns);
+      })
+      .catch(() => {});
+    insightsApi
+      .readingAnnotations(project.id)
+      .then(setAnnotations)
+      .catch(() => setAnnotations([]));
+    if (!readingPaperId && project.paperIds.length > 0) {
+      setReadingPaperId(project.paperIds[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id]);
 
   if (!project) {
     return (
@@ -155,35 +187,100 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     if (!chatInput.trim() || isChatLoading) return;
     const userMsg = chatInput.trim();
     setChatInput('');
-    setChatMessages((prev) => [...prev, { sender: 'user', text: userMsg }]);
+    setRagSources([]);
+    setChatMessages((prev) => [...prev, { sender: 'user', text: userMsg }, { sender: 'assistant', text: '' }]);
     setIsChatLoading(true);
 
     try {
-      const res = await fetch('/api/chat-assistant', {
+      const token = getAccessToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`${API_BASE}/api/v1/projects/${project.id}/ai-thread/stream`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ message: userMsg }),
+      });
+
+      if (res.ok && res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let assembled = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() || '';
+          for (const frame of frames) {
+            const line = frame.trim();
+            if (!line.startsWith('data:')) continue;
+            const parsed = JSON.parse(line.slice(5).trim());
+            if (parsed.ragSources) setRagSources(parsed.ragSources);
+            if (parsed.delta) {
+              assembled += parsed.delta;
+              setChatMessages((prev) => {
+                const copy = [...prev];
+                copy[copy.length - 1] = { sender: 'assistant', text: assembled };
+                return copy;
+              });
+            }
+          }
+        }
+        return;
+      }
+
+      // Fallback to Next.js proxy if v1 stream is unavailable
+      const fallbackRes = await fetch('/api/chat-assistant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userMsg,
           projectContext: {
+            id: project.id,
             name: project.name,
             field: project.field,
             description: project.description,
-            paperTitles: projectPapers.map((p) => p.title)
+            paperIds: project.paperIds,
+            paperTitles: projectPapers.map((p) => p.title),
           },
           conversationHistory: chatMessages.map((m) => ({
             sender: m.sender === 'user' ? 'Researcher' : 'AI Assistant',
-            text: m.text
-          }))
-        })
+            text: m.text,
+          })),
+        }),
       });
-      const data = await res.json();
+      const data = await fallbackRes.json();
       if (data.reply) {
-        setChatMessages((prev) => [...prev, { sender: 'assistant', text: data.reply }]);
+        setChatMessages((prev) => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { sender: 'assistant', text: data.reply };
+          return copy;
+        });
       }
     } catch (err) {
       console.error('Chat error:', err);
     } finally {
       setIsChatLoading(false);
+    }
+  };
+
+  const handleAddAnnotation = async (e: React.FormEvent, paperId: string, sentenceText: string) => {
+    e.preventDefault();
+    if (!annComment.trim() || selectedSentenceIdx === null) return;
+    try {
+      const created = await insightsApi.addReadingAnnotation(project.id, {
+        paperId,
+        sentenceIndex: selectedSentenceIdx,
+        highlightText: sentenceText,
+        comment: annComment.trim(),
+      });
+      setAnnotations((prev) => [...prev, created]);
+      setAnnComment('');
+      setSelectedSentenceIdx(null);
+    } catch (err) {
+      console.error('Annotation failed:', err);
     }
   };
 
@@ -289,6 +386,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         {[
           { id: 'Overview', label: 'Overview & Progress' },
           { id: 'Papers', label: `Papers (${project.paperIds.length})` },
+          { id: 'Reading Room', label: `Reading Room (${annotations.length})` },
           { id: 'Notes', label: `Notes (${project.notes.length})` },
           { id: 'Tasks', label: `Task Pipeline (${project.tasks.length})` },
           { id: 'Datasets', label: 'Datasets & Files' },
@@ -332,9 +430,11 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                 Total Time Invested
               </span>
               <p className="font-serif text-3xl font-normal text-[#141413]">
-                31 hrs
+                {analytics ? `${analytics.totalHours} hrs` : '0 hrs'}
               </p>
-              <p className="font-serif text-xs text-[#87867f] pt-1">Across active research papers</p>
+              <p className="font-serif text-xs text-[#87867f] pt-1">
+                {analytics ? `${analytics.notesCreated} notes • ${analytics.tasksCompleted}/${analytics.tasksTotal} tasks` : 'Tracked via project activity'}
+              </p>
             </div>
 
             <div className="bg-[#faf9f5] border border-[#cccbc8] rounded-2xl p-5 space-y-1">
@@ -364,7 +464,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
               </div>
               <div className="bg-[#f0eee6] border border-[#cccbc8] px-3.5 py-1.5 rounded-xl font-sans text-xs text-[#141413]">
                 <span className="text-[#87867f]">Total Time: </span>
-                <strong className="font-bold text-[#d97757]">31 hrs</strong>
+                <strong className="font-bold text-[#d97757]">{analytics ? `${analytics.totalHours} hrs` : '0 hrs'}</strong>
               </div>
             </div>
 
@@ -372,23 +472,19 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             <div className="h-64 w-full pt-2">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart
-                  data={[
-                    {
-                      paper: projectPapers[0] ? (projectPapers[0].title.length > 25 ? projectPapers[0].title.slice(0, 25) + '...' : projectPapers[0].title) : 'Research Paper X',
-                      fullName: projectPapers[0]?.title || 'Research Paper X',
-                      hours: 15
-                    },
-                    {
-                      paper: projectPapers[1] ? (projectPapers[1].title.length > 25 ? projectPapers[1].title.slice(0, 25) + '...' : projectPapers[1].title) : 'Research Paper Y',
-                      fullName: projectPapers[1]?.title || 'Research Paper Y',
-                      hours: 10
-                    },
-                    {
-                      paper: projectPapers[2] ? (projectPapers[2].title.length > 25 ? projectPapers[2].title.slice(0, 25) + '...' : projectPapers[2].title) : 'Research Paper Z',
-                      fullName: projectPapers[2]?.title || 'Research Paper Z',
-                      hours: 6
-                    }
-                  ]}
+                  data={
+                    analytics?.chart?.length
+                      ? analytics.chart.map((pt) => ({
+                          paper: pt.date,
+                          fullName: `${pt.date}: ${pt.notesCreated} notes, ${pt.tasksCompleted} tasks`,
+                          hours: Math.max(0.5, pt.notesCreated * 1.5 + pt.tasksCompleted * 2),
+                        }))
+                      : projectPapers.slice(0, 3).map((p, i) => ({
+                          paper: p.title.length > 25 ? p.title.slice(0, 25) + '...' : p.title,
+                          fullName: p.title,
+                          hours: Math.max(1, 6 - i * 2),
+                        }))
+                  }
                   layout="vertical"
                   margin={{ top: 10, right: 30, left: 20, bottom: 20 }}
                 >
@@ -466,6 +562,150 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
               <p className="font-serif text-sm text-[#87867f]">No papers associated with this workspace project yet.</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* 2B. READING ROOM (7.6: Shared Live Sentence Annotations) */}
+      {activeSubTab === 'Reading Room' && (
+        <div className="bg-[#faf9f5] border border-[#cccbc8] rounded-2xl p-6 space-y-5">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <span className="font-sans text-xs font-bold uppercase tracking-wider text-[#d97757] flex items-center gap-1.5">
+                <BookOpen className="w-3.5 h-3.5" /> Collaborative Reading Room
+              </span>
+              <h3 className="font-serif text-xl text-[#141413]">
+                Sentence-Level Shared Annotations
+              </h3>
+            </div>
+            <select
+              value={readingPaperId || projectPapers[0]?.id || papers[0]?.id || ''}
+              onChange={(e) => {
+                setReadingPaperId(e.target.value);
+                setSelectedSentenceIdx(null);
+              }}
+              className="p-2 bg-[#f0eee6] border border-[#cccbc8] rounded-xl text-xs font-sans max-w-xs"
+            >
+              {(projectPapers.length ? projectPapers : papers.slice(0, 8)).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.title.slice(0, 60)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {(() => {
+            const activePaper =
+              papers.find((p) => p.id === (readingPaperId || projectPapers[0]?.id || papers[0]?.id)) || papers[0];
+            if (!activePaper) return null;
+            const sentences = activePaper.abstract.split(/(?<=[.!?])\s+/).filter(Boolean);
+            const paperAnns = annotations.filter((a) => a.paperId === activePaper.id);
+
+            return (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                <div className="lg:col-span-7 space-y-2">
+                  <div className="font-serif text-lg font-medium text-[#141413]">{activePaper.title}</div>
+                  <p className="font-sans text-[11px] text-[#87867f]">
+                    Click any sentence below to attach an inline team annotation.
+                  </p>
+                  <div className="bg-[#f0eee6] border border-[#cccbc8] rounded-xl p-4 space-y-2">
+                    {sentences.map((sent, idx) => {
+                      const count = paperAnns.filter((a) => a.sentenceIndex === idx).length;
+                      const isSel = selectedSentenceIdx === idx;
+                      return (
+                        <div
+                          key={idx}
+                          onClick={() => setSelectedSentenceIdx(idx)}
+                          className={`p-2 rounded-lg font-serif text-sm leading-relaxed cursor-pointer transition-colors ${
+                            isSel
+                              ? 'bg-[#f5e3c7] border border-[#d97757]'
+                              : count > 0
+                              ? 'bg-[#faf9f5] border border-[#cccbc8]'
+                              : 'hover:bg-[#faf9f5]/70'
+                          }`}
+                        >
+                          <span>{sent}</span>
+                          {count > 0 && (
+                            <span className="ml-2 font-sans text-[10px] px-1.5 py-0.5 rounded-full bg-[#d97757] text-white font-bold">
+                              {count} note{count > 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="lg:col-span-5 space-y-3">
+                  {selectedSentenceIdx !== null && (
+                    <form
+                      onSubmit={(e) => handleAddAnnotation(e, activePaper.id, sentences[selectedSentenceIdx] || '')}
+                      className="bg-[#f5e3c7] border border-[#cccbc8] rounded-xl p-3 space-y-2"
+                    >
+                      <div className="font-sans text-[11px] font-bold text-[#d97757]">
+                        Annotating sentence #{selectedSentenceIdx + 1}
+                      </div>
+                      <textarea
+                        rows={2}
+                        required
+                        value={annComment}
+                        onChange={(e) => setAnnComment(e.target.value)}
+                        placeholder="Add inline observation for project members..."
+                        className="w-full p-2 bg-[#faf9f5] border border-[#cccbc8] rounded-lg text-xs font-serif"
+                      />
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedSentenceIdx(null)}
+                          className="btn-outlined-dark text-[11px] py-1 px-2.5"
+                        >
+                          Cancel
+                        </button>
+                        <button type="submit" className="btn-clay text-[11px] py-1 px-3">
+                          Post Annotation
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  <div className="space-y-2 max-h-80 overflow-y-auto">
+                    {paperAnns.length === 0 ? (
+                      <div className="text-xs font-sans text-[#87867f] p-4 bg-[#f0eee6] rounded-xl">
+                        No annotations on this paper yet.
+                      </div>
+                    ) : (
+                      paperAnns.map((ann) => (
+                        <div key={ann.id} className="bg-[#f0eee6] border border-[#cccbc8] rounded-xl p-3 space-y-1">
+                          <div className="flex items-center justify-between font-sans text-[11px] text-[#87867f]">
+                            <span className="font-bold text-[#141413]">
+                              {ann.authorName} • Sentence #{ann.sentenceIndex + 1}
+                            </span>
+                            <button
+                              onClick={() =>
+                                insightsApi
+                                  .deleteReadingAnnotation(project.id, ann.id)
+                                  .then(() => setAnnotations((prev) => prev.filter((a) => a.id !== ann.id)))
+                                  .catch(() => {})
+                              }
+                              className="text-rose-700 hover:underline"
+                              title="Delete annotation"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                          {ann.highlightText && (
+                            <p className="font-serif text-[11px] italic text-[#87867f] line-clamp-2">
+                              &ldquo;{ann.highlightText}&rdquo;
+                            </p>
+                          )}
+                          <p className="font-serif text-xs text-[#141413]">{ann.comment}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -736,8 +976,19 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             </h3>
           </div>
           <p className="font-serif text-xs text-[#87867f]">
-            Ask questions regarding project literature, methodological synthesis, or paper citations.
+            RAG-grounded streaming assistant: retrieves relevant chunks from your pinned project papers and persists conversation history.
           </p>
+
+          {ragSources.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 font-sans text-[10px]">
+              <span className="text-[#87867f] font-semibold">Grounded in chunks:</span>
+              {ragSources.map((s, idx) => (
+                <span key={idx} className="px-2 py-0.5 rounded-full bg-[#f5e3c7] text-[#141413] border border-[#cccbc8]">
+                  {s.paper_id || 'paper'} ({s.section || 'passage'})
+                </span>
+              ))}
+            </div>
+          )}
 
           <div className="bg-[#f0eee6] border border-[#cccbc8] rounded-2xl p-4 space-y-3 min-h-[250px] max-h-[400px] overflow-y-auto">
             {chatMessages.map((m, idx) => (

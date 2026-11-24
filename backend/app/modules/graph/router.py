@@ -39,4 +39,26 @@ def discovery_feedback(
     return GraphService(db).feedback(discovery_id, payload.useful)
 
 
+@router.post("/discoveries/retrain")
+def retrain_discoveries(
+    db: DbSession,
+    trainGnn: Annotated[bool, Query()] = True,
+    epochs: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> dict[str, Any]:
+    return GraphService(db).retrain_discoveries(train_gnn=trainGnn, epochs=epochs)
+
+
+@router.get("/graph/projection-status")
+def projection_status(db: ReadDbSession) -> dict[str, Any]:
+    return GraphService(db).projection_state()
+
+
+@router.post("/graph/project")
+def project_graph(
+    db: DbSession,
+    full: Annotated[bool, Query()] = False,
+) -> dict[str, Any]:
+    return GraphService(db).project_neo4j(full=full)
+
+
 __all__ = ["router"]

@@ -60,6 +60,26 @@ services:
     volumes:
       - .:/app
 
+  worker:
+    build: .
+    command: ["arq", "tasks.WorkerSettings"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql+psycopg://postgres:postgres@postgres:5432/ckgai"
+      REDIS_URL: "redis://redis:6379/0"
+      NEO4J_ENABLED: "false"
+      APP_ENV: "dev"
+      LLM_PROVIDER: "fallback"
+      ML_DEVICE: "cpu"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+
   frontend:
     build: ../
     ports:

@@ -29,6 +29,18 @@ class LLMProvider:
     ) -> str | None:
         raise NotImplementedError
 
+    def stream(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ):
+        """Yield text chunks. Default impl degrades to a single complete() call."""
+        text = self.complete(prompt, system=system, max_tokens=max_tokens)
+        if text:
+            yield text
+
 
 class FallbackProvider(LLMProvider):
     """Deterministic last resort. Mirrors the prototype's heuristic fallbacks so
@@ -80,6 +92,34 @@ class GeminiProvider(LLMProvider):
         )
         text = getattr(response, "text", None)
         return text.strip() if text else None
+
+    def stream(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ):
+        from google.genai import types
+
+        config: dict[str, object] = {"max_output_tokens": max_tokens or settings.llm_max_output_tokens, "temperature": 0.2}
+        if system:
+            config["system_instruction"] = system
+        try:
+            stream = self._client.models.generate_content_stream(
+                model=settings.gemini_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(**config),  # type: ignore[arg-type]
+            )
+            for chunk in stream:
+                piece = getattr(chunk, "text", None)
+                if piece:
+                    yield piece
+        except Exception as exc:  # noqa: BLE001
+            log.warning("gemini_stream_failed: %s", exc)
+            text = self.complete(prompt, system=system, max_tokens=max_tokens)
+            if text:
+                yield text
 
 
 class OpenAIProvider(LLMProvider):

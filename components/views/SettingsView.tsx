@@ -1,8 +1,11 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Settings, ShieldCheck, User as UserIcon, Save, Bell, Sparkles } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Settings, ShieldCheck, Save, Activity } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { usePlatformStore } from '@/lib/platform-store';
+import { insightsApi } from '@/lib/api';
+import type { VelocityResponse } from '@/lib/api/insights';
 
 interface SettingsViewProps {
   onOpenVerification: () => void;
@@ -16,6 +19,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenVerification }
   const [institution, setInstitution] = useState(user.institution);
   const [bio, setBio] = useState(user.bio);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [velocity, setVelocity] = useState<VelocityResponse | null>(null);
+
+  useEffect(() => {
+    insightsApi.velocity().then(setVelocity).catch(() => setVelocity(null));
+  }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -163,6 +171,48 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenVerification }
           </button>
         </div>
       </form>
+
+      {/* 7.7 Research Velocity Dashboard */}
+      {velocity && (
+        <div className="bg-[#faf9f5] border border-[#cccbc8] rounded-[24px] p-6 space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <span className="font-sans text-xs font-bold uppercase tracking-wider text-[#d97757] flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5" /> Research Velocity Dashboard
+              </span>
+              <h3 className="font-serif text-xl text-[#141413]">Self-Reflective Productivity Over Time</h3>
+            </div>
+            <div className="flex flex-wrap gap-2 font-sans text-xs">
+              <span className="px-2.5 py-1 rounded-lg bg-[#f0eee6] border border-[#cccbc8]">
+                Saved: <strong>{velocity.totals.papersSaved}</strong>
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-[#f0eee6] border border-[#cccbc8]">
+                Collections: <strong>{velocity.totals.collections}</strong>
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-[#f0eee6] border border-[#cccbc8]">
+                Notes: <strong>{velocity.totals.notes}</strong>
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-[#f0eee6] border border-[#cccbc8]">
+                Manuscripts: <strong>{velocity.totals.manuscripts}</strong>
+              </span>
+            </div>
+          </div>
+
+          <div className="h-56 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={velocity.series}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#cccbc8" opacity={0.5} />
+                <XAxis dataKey="month" stroke="#87867f" fontSize={11} />
+                <YAxis stroke="#87867f" fontSize={11} allowDecimals={false} />
+                <Tooltip />
+                <Bar dataKey="papersSaved" name="Papers Saved" fill="#d97757" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="notesWritten" name="Notes Written" fill="#141413" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="tasksDone" name="Tasks Done" fill="#059669" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
 
     </div>
   );
